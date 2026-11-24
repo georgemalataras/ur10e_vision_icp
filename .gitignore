@@ -1,0 +1,82 @@
+# ==========================================
+# ROS 2 Workspace / Build Artifacts
+# ==========================================
+build/
+install/
+log/
+logs/
+.colcon/
+COLCON_IGNORE
+AMENT_IGNORE
+
+# ROS Bags & Logs
+*.bag
+*.bag.active
+*.db3
+*.mcap
+*.roslog
+
+# CMake / Build files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# ==========================================
+# Python
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / Distribution / Setuptools
+*.egg-info/
+.installed.cfg
+*.egg
+dist/
+develop-eggs/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Testing & Linting
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ==========================================
+# Datasets & Temporary Outputs
+# ==========================================
+dataset/
+datasets/
+runs/
+*.avi
+*.mp4
+
+# ==========================================
+# IDEs & Editors
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ==========================================
+# OS Generated Files
+# ==========================================
+.DS_Store
+Thumbs.db
