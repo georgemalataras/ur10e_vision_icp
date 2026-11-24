@@ -228,10 +228,10 @@ class DatasetCollectorNode(Node):
                 self.get_logger().info(f"✅ Successfully reached: {pose_name}")
                 return True
             else:
-                self.get_logger().warn(f"Controller finished {pose_name} with code: {code}")
+                self.get_logger().warning(f"Controller finished {pose_name} with code: {code}")
                 return False
         else:
-            self.get_logger().warn(f"Motion for {pose_name} timed out after {max_wait:.1f}s")
+            self.get_logger().warning(f"Motion for {pose_name} timed out after {max_wait:.1f}s")
             return False
 
     def capture_frame(self, filename, pose_name):
@@ -324,7 +324,7 @@ class DatasetCollectorNode(Node):
                 if self.capture_frame(filename, pose_name):
                     saved_count += 1
             else:
-                self.get_logger().warn(f"Skipping capture for {pose_name} as pose was not reached.")
+                self.get_logger().warning(f"Skipping capture for {pose_name} as pose was not reached.")
 
         # 4. Return to HOME upon completing the linear ascent
         self.get_logger().info("\n============================================================")

@@ -197,7 +197,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                 self.get_logger().error(f"Failed to load YOLO model: {e}")
                 self._yolo = None
         else:
-            self.get_logger().warn("YOLO model not found. Using HSV segmentation fallback.")
+            self.get_logger().warning("YOLO model not found. Using HSV segmentation fallback.")
             self._yolo = None
 
         self._image_sub = self.create_subscription(
@@ -251,7 +251,7 @@ class UR10ePerceptionPickPlaceNode(Node):
             self._has_traj_client = True
             self.get_logger().info("FollowJointTrajectory controller connected.")
         else:
-            self.get_logger().warn("FollowJointTrajectory controller unavailable, falling back to MoveGroup.")
+            self.get_logger().warning("FollowJointTrajectory controller unavailable, falling back to MoveGroup.")
 
         self.get_logger().info("Connecting to Gripper action server...")
         self._use_gripper_traj = False
@@ -264,7 +264,7 @@ class UR10ePerceptionPickPlaceNode(Node):
             self.get_logger().info("Gripper command controller connected.")
         else:
             self._has_gripper = False
-            self.get_logger().warn("Gripper controller unavailable (simulation mode).")
+            self.get_logger().warning("Gripper controller unavailable (simulation mode).")
 
     def get_gripper_tcp_center(self):
         """Compute current 3D world coordinates of gripper TCP."""
@@ -316,12 +316,12 @@ class UR10ePerceptionPickPlaceNode(Node):
             future = self._gripper_traj_client.send_goal_async(goal)
             rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
             if not future.done() or future.result() is None:
-                self.get_logger().warn("Gripper trajectory goal send timed out.")
+                self.get_logger().warning("Gripper trajectory goal send timed out.")
                 return False
 
             handle = future.result()
             if not handle.accepted:
-                self.get_logger().warn("Gripper trajectory goal rejected.")
+                self.get_logger().warning("Gripper trajectory goal rejected.")
                 return False
 
             res_future = handle.get_result_async()
@@ -336,12 +336,12 @@ class UR10ePerceptionPickPlaceNode(Node):
         future = self._gripper_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
         if not future.done() or future.result() is None:
-            self.get_logger().warn("Gripper goal send timed out.")
+            self.get_logger().warning("Gripper goal send timed out.")
             return False
 
         handle = future.result()
         if not handle.accepted:
-            self.get_logger().warn("Gripper goal rejected.")
+            self.get_logger().warning("Gripper goal rejected.")
             return False
 
         res_future = handle.get_result_async()
@@ -362,7 +362,7 @@ class UR10ePerceptionPickPlaceNode(Node):
         """Execute trajectory using FollowJointTrajectory action client."""
         self.get_logger().info(f"Executing precision trajectory: {pose_name} ({duration_sec:.1f}s)")
         if not self._has_traj_client and not self._trajectory_client.wait_for_server(timeout_sec=2.0):
-            self.get_logger().warn("Trajectory controller unavailable, falling back to MoveGroup.")
+            self.get_logger().warning("Trajectory controller unavailable, falling back to MoveGroup.")
             return self.send_pose_goal(pose_name, joint_values, tolerance=0.002)
 
         self._has_traj_client = True
@@ -388,18 +388,18 @@ class UR10ePerceptionPickPlaceNode(Node):
         future = self._trajectory_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future)
         if not future.done() or future.result() is None:
-            self.get_logger().warn(f"Trajectory goal send for {pose_name} timed out. Falling back to MoveGroup.")
+            self.get_logger().warning(f"Trajectory goal send for {pose_name} timed out. Falling back to MoveGroup.")
             return self.send_pose_goal(pose_name, joint_values, tolerance=0.002)
 
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().warn(f"Trajectory goal for {pose_name} rejected. Falling back to MoveGroup.")
+            self.get_logger().warning(f"Trajectory goal for {pose_name} rejected. Falling back to MoveGroup.")
             return self.send_pose_goal(pose_name, joint_values, tolerance=0.002)
 
         res_future = goal_handle.get_result_async()
         rclpy.spin_until_future_complete(self, res_future)
         if not res_future.done() or res_future.result() is None:
-            self.get_logger().warn(f"Trajectory execution for {pose_name} timed out.")
+            self.get_logger().warning(f"Trajectory execution for {pose_name} timed out.")
             return False
 
         res = res_future.result().result
@@ -409,7 +409,7 @@ class UR10ePerceptionPickPlaceNode(Node):
             time.sleep(0.05)
             return True
         else:
-            self.get_logger().warn(f"Trajectory error code: {res.error_code}. Falling back to MoveGroup.")
+            self.get_logger().warning(f"Trajectory error code: {res.error_code}. Falling back to MoveGroup.")
             return self.send_pose_goal(pose_name, joint_values, tolerance=0.002)
 
     def send_pose_goal(
@@ -468,7 +468,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                 return True
             else:
                 err_name = MOVEIT_ERROR_NAMES.get(result.error_code.val, "UNKNOWN_ERROR")
-                self.get_logger().warn(
+                self.get_logger().warning(
                     f"MoveIt attempt {attempt}/{max_retries} finished with code {result.error_code.val} ({err_name})"
                 )
                 if attempt < max_retries:
@@ -522,7 +522,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                     conf = float(best_box_item.conf[0])
                     best_box = xyxy
             except Exception as e:
-                self.get_logger().warn(f"YOLO inference exception: {e}")
+                self.get_logger().warning(f"YOLO inference exception: {e}")
 
         return cx, cy, conf, best_box
 
@@ -652,7 +652,7 @@ class UR10ePerceptionPickPlaceNode(Node):
             cv2.imwrite("/tmp/perception_detection.jpg", annotated)
             self.get_logger().info("Saved detection snapshot to: /tmp/perception_detection.jpg")
         except Exception as e:
-            self.get_logger().warn(f"Failed to save snapshot: {e}")
+            self.get_logger().warning(f"Failed to save snapshot: {e}")
 
         return best_x, best_y, 0.825
 
@@ -701,7 +701,7 @@ class UR10ePerceptionPickPlaceNode(Node):
 
         if not self.send_exact_trajectory("INSPECT_CLOSEUP", q_inspect, duration_sec=3.0):
             if not self.send_pose_goal("INSPECT_CLOSEUP", q_inspect, velocity_scaling=0.30):
-                self.get_logger().warn("Close-up motion failed. Retaining coarse target.")
+                self.get_logger().warning("Close-up motion failed. Retaining coarse target.")
                 return coarse_x, coarse_y, target_z
 
         time.sleep(0.5)
@@ -735,11 +735,11 @@ class UR10ePerceptionPickPlaceNode(Node):
                 cv2.imwrite("/tmp/perception_stage2_closeup.jpg", annotated)
                 self.get_logger().info("Saved close-up snapshot to: /tmp/perception_stage2_closeup.jpg")
             except Exception as e:
-                self.get_logger().warn(f"Failed to save close-up snapshot: {e}")
+                self.get_logger().warning(f"Failed to save close-up snapshot: {e}")
 
             return fine_x, fine_y, target_z
         else:
-            self.get_logger().warn("Cube not detected in close-up view. Retaining coarse target.")
+            self.get_logger().warning("Cube not detected in close-up view. Retaining coarse target.")
             return coarse_x, coarse_y, target_z
 
     def execute_linear_scan(self, target_z=0.825, scan_seed=None):
@@ -753,7 +753,7 @@ class UR10ePerceptionPickPlaceNode(Node):
         self.get_logger().info("[Step 0a] Releasing cube at startup...")
         try:
             import subprocess
-            gz_bin = "/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz"
+            gz_bin = "/opt/ros/lyrical/opt/gz_tools_vendor/bin/gz"
             if os.path.exists(gz_bin):
                 subprocess.run(
                     [gz_bin, "topic", "-t", "/cube/detach", "-m", "gz.msgs.Empty", "-p", " "],
@@ -844,7 +844,7 @@ class UR10ePerceptionPickPlaceNode(Node):
             time.sleep(0.02)
         try:
             import subprocess
-            gz_bin = "/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz"
+            gz_bin = "/opt/ros/lyrical/opt/gz_tools_vendor/bin/gz"
             if os.path.exists(gz_bin):
                 subprocess.run(
                     [gz_bin, "topic", "-t", "/cube/attach", "-m", "gz.msgs.Empty", "-p", " "],
@@ -883,7 +883,7 @@ class UR10ePerceptionPickPlaceNode(Node):
             time.sleep(0.02)
         try:
             import subprocess
-            gz_bin = "/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz"
+            gz_bin = "/opt/ros/lyrical/opt/gz_tools_vendor/bin/gz"
             if os.path.exists(gz_bin):
                 subprocess.run(
                     [gz_bin, "topic", "-t", "/cube/detach", "-m", "gz.msgs.Empty", "-p", " "],

@@ -55,7 +55,7 @@ class RandomCubeSpawner(Node):
             if res.returncode == 0:
                 self.get_logger().info("✅ red_cube spawned successfully in Gazebo!")
             else:
-                self.get_logger().warn(f"Spawner output: {res.stdout} {res.stderr}")
+                self.get_logger().warning(f"Spawner output: {res.stdout} {res.stderr}")
         except Exception as e:
             self.get_logger().error(f"Failed to spawn cube: {e}")
 
