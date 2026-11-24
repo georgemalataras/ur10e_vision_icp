@@ -58,7 +58,9 @@ JOINT_NAMES = [
 
 POSES = {
     "HOME": [0.0, -1.5707, 0.0, -1.5707, 0.0, 0.0],
-    "OBSERVE_CENTER": [-0.2063, -1.2352, 0.7682, -1.1038, -1.5708, 0.0],
+    # Angled (~40 deg oblique 3D view) observation pose looking directly at the cube on the table
+    "OBSERVE_CENTER": [-0.5699, -1.7262, 2.1257, -2.2650, -0.9339, 0.0043],
+    "OBSERVE_ANGLED": [-0.5699, -1.7262, 2.1257, -2.2650, -0.9339, 0.0043],
     "OBSERVE_LEFT": [0.1671, -1.2196, 1.0250, -1.3762, -1.5708, 0.0],
     "OBSERVE_RIGHT": [-0.5530, -1.2196, 1.0250, -1.3762, -1.5708, 0.0],
     "SCAN_TRANSIT": [0.1671, -1.5707, 1.3104, -1.6457, -1.5708, 0.0],
@@ -174,6 +176,8 @@ class UR10ePerceptionPickPlaceNode(Node):
     def __init__(self):
         super().__init__("ur10e_perception_pick_place_node")
         self.get_logger().info("Initializing UR10e Perception Pick-and-Place node...")
+        self.declare_parameter("observe_only", False)
+        self._observe_only = bool(self.get_parameter("observe_only").value)
 
         self._cv_bridge = CvBridge()
         self._latest_image = None
@@ -773,22 +777,26 @@ class UR10ePerceptionPickPlaceNode(Node):
         self.command_gripper(0.0, max_effort=30.0, timeout_sec=3.0)
         time.sleep(0.2)
 
+        if self._observe_only:
+            self.get_logger().info("[Observe-Only Mode] Moving directly to Angled Observation Pose (OBSERVE_CENTER)...")
+            if not self.send_exact_trajectory("OBSERVE_CENTER", POSES["OBSERVE_CENTER"], duration_sec=3.0):
+                self.send_pose_goal("OBSERVE_CENTER", POSES["OBSERVE_CENTER"], velocity_scaling=0.30)
+            self.get_logger().info("Robot is now holding at OBSERVE_CENTER (~40 deg angled 3D view of the red cube). Ready for RViz2 inspection!")
+            return True
+
         # Move to HOME
         self.get_logger().info("[Step 1] Moving to HOME")
         if not self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25):
             return False
         time.sleep(0.3)
 
-        # Stage 1: Coarse Overview
-        self.get_logger().info("[Step 2] Executing Stage 1 Coarse Overview")
-        coarse_x, coarse_y, coarse_z = self.observe_and_detect_cube(target_z=0.825)
-        if coarse_x is None or coarse_y is None:
+        # Single-Stage Angled Observation & Detection (no 2nd stage closeup visual servoing)
+        self.get_logger().info("[Step 2] Executing Single-Scan Angled Observation (OBSERVE_CENTER)")
+        cube_x, cube_y, cube_z = self.observe_and_detect_cube(target_z=0.825)
+        if cube_x is None or cube_y is None:
             self.get_logger().error("Cube detection failed. Aborting sequence.")
             self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25)
             return False
-
-        # Stage 2: Eye-in-Hand Visual Servoing
-        cube_x, cube_y, cube_z = self.closeup_visual_servoing(coarse_x, coarse_y, target_z=0.825)
 
         # Compute trajectory waypoints with sequential seeding
         self.get_logger().info(f"[Step 3] Computing grasp kinematics for target: X={cube_x:.3f}, Y={cube_y:.3f}")

@@ -2,10 +2,11 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -15,6 +16,7 @@ def generate_launch_description():
     gazebo_gui = LaunchConfiguration("gazebo_gui")
     rviz = LaunchConfiguration("rviz")
     run_script = LaunchConfiguration("run_script")
+    observe_only = LaunchConfiguration("observe_only")
     script_delay = LaunchConfiguration("script_delay")
 
     declare_gazebo_gui = DeclareLaunchArgument(
@@ -33,6 +35,12 @@ def generate_launch_description():
         "run_script",
         default_value="true",
         description="Run pick and place motion planning script automatically",
+    )
+
+    declare_observe_only = DeclareLaunchArgument(
+        "observe_only",
+        default_value="false",
+        description="Move robot only to the angled observation pose and hold for FOV inspection",
     )
 
     declare_script_delay = DeclareLaunchArgument(
@@ -85,7 +93,23 @@ def generate_launch_description():
         executable="perception_pick_and_place.py",
         name="ur10e_perception_pick_place_node",
         output="screen",
-        parameters=[{"use_sim_time": True}],
+        parameters=[
+            {"use_sim_time": True},
+            {"observe_only": ParameterValue(observe_only, value_type=bool)},
+        ],
+    )
+
+    # When run_script:=false, automatically move the robot to the angled observation pose
+    # so the camera immediately sees the red cube under angle in RViz2/Gazebo
+    initial_observe_pose_node = Node(
+        package="ur10e_perception_workcell",
+        executable="perception_pick_and_place.py",
+        name="ur10e_initial_observe_pose_node",
+        output="screen",
+        parameters=[
+            {"use_sim_time": True},
+            {"observe_only": True},
+        ],
     )
 
     delayed_script_execution = TimerAction(
@@ -94,16 +118,24 @@ def generate_launch_description():
         condition=IfCondition(run_script),
     )
 
+    delayed_initial_observe = TimerAction(
+        period=10.0,
+        actions=[initial_observe_pose_node],
+        condition=UnlessCondition(run_script),
+    )
+
     return LaunchDescription(
         [
             declare_gazebo_gui,
             declare_rviz,
             declare_run_script,
+            declare_observe_only,
             declare_script_delay,
             declare_cube_x,
             declare_cube_y,
             sim_launch,
             move_group_launch,
             delayed_script_execution,
+            delayed_initial_observe,
         ]
     )
