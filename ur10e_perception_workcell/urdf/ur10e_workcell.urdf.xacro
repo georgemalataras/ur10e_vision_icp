@@ -25,28 +25,32 @@
   <link name="world"/>
 
   <!-- Pedestal base: stands on floor, top at z = 0.75m (just below table surface 0.80m) -->
+  <!-- Geometry is excluded from URDF by default and loaded via MoveIt PlanningScene + Gazebo world -->
+  <xacro:arg name="include_pedestal" default="false"/>
   <xacro:property name="pedestal_height" value="0.75"/>
   <link name="pedestal_link">
-    <visual>
-      <origin xyz="0 0 ${pedestal_height / 2.0}" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.4 0.4 ${pedestal_height}"/>
-      </geometry>
-      <material name="pedestal_color">
-        <color rgba="0.25 0.25 0.28 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 ${pedestal_height / 2.0}" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.4 0.4 ${pedestal_height}"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <origin xyz="0 0 ${pedestal_height / 2.0}" rpy="0 0 0"/>
-      <mass value="50.0"/>
-      <inertia ixx="4.83" ixy="0.0" ixz="0.0" iyy="4.83" iyz="0.0" izz="1.33"/>
-    </inertial>
+    <xacro:if value="$(arg include_pedestal)">
+      <visual>
+        <origin xyz="0 0 ${pedestal_height / 2.0}" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.4 0.4 ${pedestal_height}"/>
+        </geometry>
+        <material name="pedestal_color">
+          <color rgba="0.25 0.25 0.28 1.0"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${pedestal_height / 2.0}" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.4 0.4 ${pedestal_height}"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <origin xyz="0 0 ${pedestal_height / 2.0}" rpy="0 0 0"/>
+        <mass value="50.0"/>
+        <inertia ixx="4.83" ixy="0.0" ixz="0.0" iyy="4.83" iyz="0.0" izz="1.33"/>
+      </inertial>
+    </xacro:if>
   </link>
 
   <joint name="world_to_pedestal_joint" type="fixed">

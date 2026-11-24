@@ -92,19 +92,6 @@ class WorkcellPlanningScenePublisher(Node):
         scene = PlanningScene()
         scene.is_diff = True
         scene.world.collision_objects = [pedestal_obj, table_obj, cube_obj]
-
-        # Object colors for clear visualization in RViz2 PlanningScene display
-        def make_color(obj_id: str, r: float, g: float, b: float, a: float = 1.0) -> ObjectColor:
-            oc = ObjectColor()
-            oc.id = obj_id
-            oc.color = ColorRGBA(r=float(r), g=float(g), b=float(b), a=float(a))
-            return oc
-
-        scene.object_colors = [
-            make_color("pedestal", 0.28, 0.28, 0.32, 1.0),
-            make_color("table", 0.55, 0.40, 0.25, 1.0),
-            make_color("red_cube", 0.90, 0.10, 0.10, 1.0),
-        ]
         return scene
 
     def apply_scene(self):

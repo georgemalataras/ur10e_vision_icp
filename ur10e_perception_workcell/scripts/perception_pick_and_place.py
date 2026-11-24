@@ -302,14 +302,9 @@ class UR10ePerceptionPickPlaceNode(Node):
         co.primitives.append(box)
         co.primitive_poses.append(pose)
 
-        oc = ObjectColor()
-        oc.id = "red_cube"
-        oc.color = ColorRGBA(r=0.90, g=0.10, b=0.10, a=1.0)
-
         scene = PlanningScene()
         scene.is_diff = True
         scene.world.collision_objects.append(co)
-        scene.object_colors.append(oc)
         self._planning_scene_pub.publish(scene)
         self.get_logger().info(f"Updated 'red_cube' CollisionObject in PlanningScene at ({x:.3f}, {y:.3f}, {z:.3f})")
 

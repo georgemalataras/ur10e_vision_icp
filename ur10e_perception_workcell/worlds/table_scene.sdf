@@ -96,6 +96,35 @@
       </link>
     </model>
 
+    <!-- Robot Base Pedestal Model (0.4 x 0.4 x 0.75 m at origin) -->
+    <model name="pedestal">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="pedestal_link">
+        <collision name="pedestal_collision">
+          <pose>0 0 0.375 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.75</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="pedestal_visual">
+          <pose>0 0 0.375 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.4 0.4 0.75</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.25 0.25 0.28 1</ambient>
+            <diffuse>0.25 0.25 0.28 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
     <!-- 4-Legged Industrial Table Model -->
     <model name="table">
       <static>true</static>
