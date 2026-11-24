@@ -92,6 +92,12 @@ class WorkcellPlanningScenePublisher(Node):
         scene = PlanningScene()
         scene.is_diff = True
         scene.world.collision_objects = [pedestal_obj, table_obj, cube_obj]
+
+        # Color only red_cube in bright red for contrast against the MoveIt green table & pedestal
+        cube_color = ObjectColor()
+        cube_color.id = "red_cube"
+        cube_color.color = ColorRGBA(r=0.95, g=0.10, b=0.10, a=1.0)
+        scene.object_colors = [cube_color]
         return scene
 
     def apply_scene(self):

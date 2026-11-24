@@ -103,7 +103,7 @@ Visualization Manager:
         Voxel Coloring: Z-Axis
         Voxel Rendering: Occupied Voxels
       Scene Robot:
-        Attached Body Color: 150; 50; 150
+        Attached Body Color: 240; 25; 25
         Robot Alpha: 1.0
         Show Robot Collision: false
         Show Robot Visual: true
