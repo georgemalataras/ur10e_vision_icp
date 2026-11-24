@@ -13,6 +13,7 @@ def generate_launch_description():
 
     # Launch Arguments
     gazebo_gui = LaunchConfiguration("gazebo_gui")
+    rviz = LaunchConfiguration("rviz")
     run_script = LaunchConfiguration("run_script")
     script_delay = LaunchConfiguration("script_delay")
 
@@ -20,6 +21,12 @@ def generate_launch_description():
         "gazebo_gui",
         default_value="true",
         description="Launch Gazebo with GUI",
+    )
+
+    declare_rviz = DeclareLaunchArgument(
+        "rviz",
+        default_value="true",
+        description="Launch RViz2 for 3D PointCloud2 and camera visualization",
     )
 
     declare_run_script = DeclareLaunchArgument(
@@ -56,6 +63,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             "gazebo_gui": gazebo_gui,
+            "rviz": rviz,
             "cube_x": cube_x,
             "cube_y": cube_y,
         }.items(),
@@ -89,6 +97,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             declare_gazebo_gui,
+            declare_rviz,
             declare_run_script,
             declare_script_delay,
             declare_cube_x,

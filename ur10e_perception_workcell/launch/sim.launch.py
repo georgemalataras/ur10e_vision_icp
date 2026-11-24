@@ -41,11 +41,25 @@ def generate_launch_description():
     )
 
     gui_config_file = LaunchConfiguration("gui_config_file")
+    rviz = LaunchConfiguration("rviz")
+    rviz_config_file = LaunchConfiguration("rviz_config_file")
 
     declare_gui_config_file = DeclareLaunchArgument(
         "gui_config_file",
         default_value=os.path.join(pkg_ur10e_workcell, "config", "gui.config"),
         description="Path to the Gazebo GUI configuration file",
+    )
+
+    declare_rviz = DeclareLaunchArgument(
+        "rviz",
+        default_value="false",
+        description="Launch RViz2 for 3D PointCloud2 and camera visualization",
+    )
+
+    declare_rviz_config_file = DeclareLaunchArgument(
+        "rviz_config_file",
+        default_value=os.path.join(pkg_ur10e_workcell, "config", "workcell.rviz"),
+        description="Path to the RViz2 configuration file",
     )
 
     # Random Tabletop Pose for Red Cube (Z=0.825m surface, fixed orientation Yaw=0.0)
@@ -158,7 +172,7 @@ def generate_launch_description():
         ],
     )
 
-    # ROS-GZ Parameter Bridge (/clock, /cube/attach, /cube/detach, /wrist_camera/image, /wrist_camera/camera_info)
+    # ROS-GZ Parameter Bridge (/clock, /cube/attach, /cube/detach, RGB-D camera topics)
     gz_sim_bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
@@ -167,9 +181,37 @@ def generate_launch_description():
             "/cube/attach@std_msgs/msg/Empty]gz.msgs.Empty",
             "/cube/detach@std_msgs/msg/Empty]gz.msgs.Empty",
             "/wrist_camera/image@sensor_msgs/msg/Image[gz.msgs.Image",
+            "/wrist_camera/depth_image@sensor_msgs/msg/Image[gz.msgs.Image",
             "/wrist_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+            "/wrist_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
         ],
         output="screen",
+    )
+
+    # Static TF alias from wrist_camera_link to Gazebo's scoped sensor frame
+    # (ur10e_workcell/tool0/wrist_camera) so PointCloud2 renders in RViz2 seamlessly
+    camera_gz_frame_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="wrist_camera_gz_frame_broadcaster",
+        arguments=[
+            "--x", "0", "--y", "0", "--z", "0",
+            "--roll", "0", "--pitch", "0", "--yaw", "0",
+            "--frame-id", "wrist_camera_link",
+            "--child-frame-id", "ur10e_workcell/tool0/wrist_camera",
+        ],
+        parameters=[{"use_sim_time": True}],
+    )
+
+    # Optional RViz2 Node for visualizing RobotModel, RGB, Depth, and 3D PointCloud2
+    rviz_node = Node(
+        package="rviz2",
+        executable="rviz2",
+        name="rviz2",
+        output="screen",
+        arguments=["-d", rviz_config_file],
+        parameters=[{"use_sim_time": True}],
+        condition=IfCondition(rviz),
     )
 
     # Controller Spawners
@@ -215,7 +257,7 @@ def generate_launch_description():
     # Ensure DetachableJoint is detached so cube rests freely on table under gravity
     gz_initial_detach = ExecuteProcess(
         cmd=[
-            "/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz",
+            FindExecutable(name="gz"),
             "topic",
             "-t",
             "/cube/detach",
@@ -238,13 +280,17 @@ def generate_launch_description():
             declare_world_file,
             declare_controllers_file,
             declare_gui_config_file,
+            declare_rviz,
+            declare_rviz_config_file,
             declare_cube_x,
             declare_cube_y,
             gz_launch_description,
             robot_state_publisher_node,
+            camera_gz_frame_tf,
             gz_spawn_entity,
             gz_spawn_cube,
             gz_sim_bridge,
+            rviz_node,
             delayed_gz_initial_detach,
             delay_joint_state_broadcaster,
             delay_joint_trajectory_controller,
