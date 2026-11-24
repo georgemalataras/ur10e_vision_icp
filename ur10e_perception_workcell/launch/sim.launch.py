@@ -2,7 +2,7 @@ import os
 import random
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, RegisterEventHandler, TimerAction
+from launch.actions import AppendEnvironmentVariable, DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, RegisterEventHandler, TimerAction
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -214,23 +214,55 @@ def generate_launch_description():
         condition=IfCondition(rviz),
     )
 
-    # Controller Spawners
+    # Ensure Gazebo can resolve package://ur_description and package://robotiq_description meshes
+    gz_resource_ur = AppendEnvironmentVariable(
+        name="GZ_SIM_RESOURCE_PATH",
+        value=PathJoinSubstitution([FindPackageShare("ur_description"), ".."]),
+    )
+    gz_resource_robotiq = AppendEnvironmentVariable(
+        name="GZ_SIM_RESOURCE_PATH",
+        value=PathJoinSubstitution([FindPackageShare("robotiq_description"), ".."]),
+    )
+    gz_resource_workcell = AppendEnvironmentVariable(
+        name="GZ_SIM_RESOURCE_PATH",
+        value=PathJoinSubstitution([FindPackageShare("ur10e_perception_workcell"), ".."]),
+    )
+
+    # Controller Spawners (pass --param-file explicitly for ROS 2 Lyrical controller_manager compatibility)
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+            "--param-file",
+            controllers_file,
+        ],
     )
 
     joint_trajectory_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_trajectory_controller", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "joint_trajectory_controller",
+            "--controller-manager",
+            "/controller_manager",
+            "--param-file",
+            controllers_file,
+        ],
     )
 
     robotiq_gripper_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["robotiq_gripper_controller", "--controller-manager", "/controller_manager"],
+        arguments=[
+            "robotiq_gripper_controller",
+            "--controller-manager",
+            "/controller_manager",
+            "--param-file",
+            controllers_file,
+        ],
     )
 
     delay_joint_state_broadcaster = RegisterEventHandler(
@@ -284,6 +316,9 @@ def generate_launch_description():
             declare_rviz_config_file,
             declare_cube_x,
             declare_cube_y,
+            gz_resource_ur,
+            gz_resource_robotiq,
+            gz_resource_workcell,
             gz_launch_description,
             robot_state_publisher_node,
             camera_gz_frame_tf,

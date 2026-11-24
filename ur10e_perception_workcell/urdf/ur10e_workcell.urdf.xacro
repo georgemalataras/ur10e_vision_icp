@@ -72,7 +72,8 @@
     kinematics_parameters_file="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"
     physical_parameters_file="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"
     visual_parameters_file="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"
-    safety_limits="false">
+    safety_limits="false"
+    force_abs_paths="true">
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </xacro:ur_robot>
 
