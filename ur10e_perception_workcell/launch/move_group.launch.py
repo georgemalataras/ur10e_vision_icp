@@ -44,7 +44,7 @@ def generate_launch_description():
             " ",
             "sim_gazebo:=false",
             " ",
-            "include_table:=true",
+            "include_table:=false",
             " ",
             "include_cube:=false",
         ]

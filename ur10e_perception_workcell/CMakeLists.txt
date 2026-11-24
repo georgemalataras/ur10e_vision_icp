@@ -15,6 +15,7 @@ install(
 install(
   PROGRAMS
     scripts/perception_pick_and_place.py
+    scripts/publish_planning_scene.py
     scripts/spawn_random_cube.py
   DESTINATION lib/${PROJECT_NAME}
 )

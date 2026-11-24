@@ -87,6 +87,25 @@ def generate_launch_description():
         }.items(),
     )
 
+    # 2b. Publish Workcell CollisionObjects (pedestal, table, red_cube) to MoveIt PlanningScene
+    planning_scene_publisher_node = Node(
+        package="ur10e_perception_workcell",
+        executable="publish_planning_scene.py",
+        name="workcell_planning_scene_publisher",
+        output="screen",
+        parameters=[
+            {"use_sim_time": True},
+            {"cube_x": ParameterValue(cube_x, value_type=float)},
+            {"cube_y": ParameterValue(cube_y, value_type=float)},
+            {"cube_z": 0.825},
+        ],
+    )
+
+    delayed_planning_scene = TimerAction(
+        period=5.0,
+        actions=[planning_scene_publisher_node],
+    )
+
     # 3. Vision-Guided Motion Planning Sequence Node
     perception_pick_and_place_node = Node(
         package="ur10e_perception_workcell",
@@ -135,6 +154,7 @@ def generate_launch_description():
             declare_cube_y,
             sim_launch,
             move_group_launch,
+            delayed_planning_scene,
             delayed_script_execution,
             delayed_initial_observe,
         ]

@@ -22,11 +22,21 @@ from rclpy.action import ActionClient
 from rclpy.duration import Duration
 
 from sensor_msgs.msg import Image, JointState, CameraInfo
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, ColorRGBA
+from geometry_msgs.msg import Pose
+from shape_msgs.msg import SolidPrimitive
 from control_msgs.action import GripperCommand, FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from moveit_msgs.action import MoveGroup
-from moveit_msgs.msg import Constraints, JointConstraint, MotionPlanRequest
+from moveit_msgs.msg import (
+    AttachedCollisionObject,
+    CollisionObject,
+    Constraints,
+    JointConstraint,
+    MotionPlanRequest,
+    ObjectColor,
+    PlanningScene,
+)
 from cv_bridge import CvBridge
 
 import tf2_ros
@@ -242,6 +252,7 @@ class UR10ePerceptionPickPlaceNode(Node):
 
         self._attach_pub = self.create_publisher(Empty, "/cube/attach", 10)
         self._detach_pub = self.create_publisher(Empty, "/cube/detach", 10)
+        self._planning_scene_pub = self.create_publisher(PlanningScene, "/planning_scene", 10)
         self._current_gripper_pos = 0.0
 
         self.get_logger().info("Connecting to MoveGroup action server...")
@@ -269,6 +280,96 @@ class UR10ePerceptionPickPlaceNode(Node):
         else:
             self._has_gripper = False
             self.get_logger().warning("Gripper controller unavailable (simulation mode).")
+
+    def update_cube_in_planning_scene(self, x: float, y: float, z: float = 0.825):
+        """Update red_cube CollisionObject position in MoveIt PlanningScene."""
+        co = CollisionObject()
+        co.header.frame_id = "world"
+        co.header.stamp = self.get_clock().now().to_msg()
+        co.id = "red_cube"
+        co.operation = CollisionObject.ADD
+
+        box = SolidPrimitive()
+        box.type = SolidPrimitive.BOX
+        box.dimensions = [0.05, 0.05, 0.05]
+
+        pose = Pose()
+        pose.position.x = float(x)
+        pose.position.y = float(y)
+        pose.position.z = float(z)
+        pose.orientation.w = 1.0
+
+        co.primitives.append(box)
+        co.primitive_poses.append(pose)
+
+        oc = ObjectColor()
+        oc.id = "red_cube"
+        oc.color = ColorRGBA(r=0.90, g=0.10, b=0.10, a=1.0)
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.world.collision_objects.append(co)
+        scene.object_colors.append(oc)
+        self._planning_scene_pub.publish(scene)
+        self.get_logger().info(f"Updated 'red_cube' CollisionObject in PlanningScene at ({x:.3f}, {y:.3f}, {z:.3f})")
+
+    def attach_cube_in_planning_scene(self):
+        """Attach red_cube CollisionObject to tcp_link in MoveIt PlanningScene during lift/transfer."""
+        aco = AttachedCollisionObject()
+        aco.link_name = "tcp_link"
+        aco.object.header.frame_id = "tcp_link"
+        aco.object.header.stamp = self.get_clock().now().to_msg()
+        aco.object.id = "red_cube"
+        aco.object.operation = CollisionObject.ADD
+
+        box = SolidPrimitive()
+        box.type = SolidPrimitive.BOX
+        box.dimensions = [0.05, 0.05, 0.05]
+
+        pose = Pose()
+        pose.orientation.w = 1.0
+        aco.object.primitives.append(box)
+        aco.object.primitive_poses.append(pose)
+
+        aco.touch_links = [
+            "tcp_link",
+            "robotiq_85_base_link",
+            "robotiq_85_left_knuckle_link",
+            "robotiq_85_right_knuckle_link",
+            "robotiq_85_left_finger_link",
+            "robotiq_85_right_finger_link",
+            "robotiq_85_left_inner_knuckle_link",
+            "robotiq_85_right_inner_knuckle_link",
+            "robotiq_85_left_finger_tip_link",
+            "robotiq_85_right_finger_tip_link",
+        ]
+
+        remove_world = CollisionObject()
+        remove_world.id = "red_cube"
+        remove_world.operation = CollisionObject.REMOVE
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.world.collision_objects.append(remove_world)
+        scene.robot_state.is_diff = True
+        scene.robot_state.attached_collision_objects.append(aco)
+        self._planning_scene_pub.publish(scene)
+        self.get_logger().info("Attached 'red_cube' to tcp_link in MoveIt PlanningScene")
+
+    def detach_cube_in_planning_scene(self, place_x: float, place_y: float, place_z: float = 0.825):
+        """Detach red_cube from tcp_link and place it back on table in MoveIt PlanningScene."""
+        aco = AttachedCollisionObject()
+        aco.link_name = "tcp_link"
+        aco.object.id = "red_cube"
+        aco.object.operation = CollisionObject.REMOVE
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.robot_state.is_diff = True
+        scene.robot_state.attached_collision_objects.append(aco)
+        self._planning_scene_pub.publish(scene)
+        time.sleep(0.05)
+        self.update_cube_in_planning_scene(place_x, place_y, place_z)
 
     def get_gripper_tcp_center(self):
         """Compute current 3D world coordinates of gripper TCP."""
@@ -798,6 +899,9 @@ class UR10ePerceptionPickPlaceNode(Node):
             self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25)
             return False
 
+        # Update detected cube pose in MoveIt PlanningScene
+        self.update_cube_in_planning_scene(cube_x, cube_y, cube_z)
+
         # Compute trajectory waypoints with sequential seeding
         self.get_logger().info(f"[Step 3] Computing grasp kinematics for target: X={cube_x:.3f}, Y={cube_y:.3f}")
         pre_grasp_pos = [cube_x, cube_y, 0.980]
@@ -860,6 +964,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                 )
         except Exception:
             pass
+        self.attach_cube_in_planning_scene()
         time.sleep(0.15)
 
         # Lift cube
@@ -899,6 +1004,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                 )
         except Exception:
             pass
+        self.detach_cube_in_planning_scene(place_x, place_y, 0.825)
         time.sleep(0.25)
 
         # Retract away from cube

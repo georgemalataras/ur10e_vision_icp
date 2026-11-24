@@ -203,14 +203,22 @@ def generate_launch_description():
         parameters=[{"use_sim_time": True}],
     )
 
-    # Optional RViz2 Node for visualizing RobotModel, RGB, Depth, and 3D PointCloud2
+    # Optional RViz2 Node for visualizing RobotModel, PlanningScene, RGB, Depth, and 3D PointCloud2
+    srdf_path = os.path.join(pkg_ur10e_workcell, "srdf", "ur10e_workcell.srdf")
+    with open(srdf_path, "r") as srdf_file:
+        srdf_content = srdf_file.read()
+
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
         name="rviz2",
         output="screen",
         arguments=["-d", rviz_config_file],
-        parameters=[{"use_sim_time": True}],
+        parameters=[
+            {"use_sim_time": True},
+            robot_description,
+            {"robot_description_semantic": srdf_content},
+        ],
         condition=IfCondition(rviz),
     )
 
