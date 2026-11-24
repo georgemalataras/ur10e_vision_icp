@@ -32,9 +32,13 @@ from cv_bridge import CvBridge
 import tf2_ros
 
 # Append YOLO virtual environment if available
-venv_path = "/home/gerogemal/Documents/yolo11-tutorial/venv/lib/python3.12/site-packages"
-if os.path.exists(venv_path) and venv_path not in sys.path:
-    sys.path.append(venv_path)
+for venv_path in [
+    os.path.expanduser("~/ros2_ai_venv/lib/python3.14/site-packages"),
+    os.path.expanduser("~/ros2_ai_venv/lib/python3.12/site-packages"),
+    "/home/gerogemal/Documents/yolo11-tutorial/venv/lib/python3.12/site-packages",
+]:
+    if os.path.exists(venv_path) and venv_path not in sys.path:
+        sys.path.append(venv_path)
 
 try:
     from ultralytics import YOLO
@@ -177,8 +181,9 @@ class UR10ePerceptionPickPlaceNode(Node):
         self._current_joints = list(POSES["HOME"])
 
         model_candidates = [
-            "/home/gerogemal/Documents/yolo11-tutorial/best.pt",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "models", "weights", "best.pt"),
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "weights", "best.pt"),
+            "/home/gerogemal/Documents/yolo11-tutorial/best.pt",
             os.path.join(os.path.expanduser("~"), "Documents", "yolo11-tutorial", "best.pt"),
             "best.pt",
         ]
@@ -224,6 +229,9 @@ class UR10ePerceptionPickPlaceNode(Node):
         self._trajectory_client = ActionClient(
             self, FollowJointTrajectory, "/joint_trajectory_controller/follow_joint_trajectory"
         )
+        self._gripper_traj_client = ActionClient(
+            self, FollowJointTrajectory, "/robotiq_gripper_controller/follow_joint_trajectory"
+        )
         self._gripper_client = ActionClient(
             self, GripperCommand, "/robotiq_gripper_controller/gripper_cmd"
         )
@@ -246,9 +254,14 @@ class UR10ePerceptionPickPlaceNode(Node):
             self.get_logger().warn("FollowJointTrajectory controller unavailable, falling back to MoveGroup.")
 
         self.get_logger().info("Connecting to Gripper action server...")
-        if self._gripper_client.wait_for_server(timeout_sec=10.0):
+        self._use_gripper_traj = False
+        if self._gripper_traj_client.wait_for_server(timeout_sec=8.0):
             self._has_gripper = True
-            self.get_logger().info("Gripper controller connected.")
+            self._use_gripper_traj = True
+            self.get_logger().info("Gripper trajectory controller connected.")
+        elif self._gripper_client.wait_for_server(timeout_sec=2.0):
+            self._has_gripper = True
+            self.get_logger().info("Gripper command controller connected.")
         else:
             self._has_gripper = False
             self.get_logger().warn("Gripper controller unavailable (simulation mode).")
@@ -288,6 +301,34 @@ class UR10ePerceptionPickPlaceNode(Node):
             return True
 
         self.get_logger().info(f"Gripper command: position={position:.3f} rad, max_effort={max_effort:.1f} N")
+        if self._use_gripper_traj:
+            goal = FollowJointTrajectory.Goal()
+            traj = JointTrajectory()
+            traj.joint_names = ["robotiq_85_left_knuckle_joint"]
+
+            p1 = JointTrajectoryPoint()
+            p1.positions = [float(position)]
+            p1.velocities = [0.0]
+            p1.time_from_start = Duration(seconds=1, nanoseconds=0).to_msg()
+            traj.points.append(p1)
+            goal.trajectory = traj
+
+            future = self._gripper_traj_client.send_goal_async(goal)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            if not future.done() or future.result() is None:
+                self.get_logger().warn("Gripper trajectory goal send timed out.")
+                return False
+
+            handle = future.result()
+            if not handle.accepted:
+                self.get_logger().warn("Gripper trajectory goal rejected.")
+                return False
+
+            res_future = handle.get_result_async()
+            rclpy.spin_until_future_complete(self, res_future, timeout_sec=timeout_sec)
+            self.get_logger().info(f"Gripper motion complete: live pos={self._current_gripper_pos:.3f} rad")
+            return True
+
         goal = GripperCommand.Goal()
         goal.command.position = float(position)
         goal.command.max_effort = float(max_effort)

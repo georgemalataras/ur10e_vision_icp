@@ -12,7 +12,7 @@ controller_manager:
       type: joint_trajectory_controller/JointTrajectoryController
 
     robotiq_gripper_controller:
-      type: position_controllers/GripperActionController
+      type: joint_trajectory_controller/JointTrajectoryController
 
 scaled_joint_trajectory_controller:
   ros__parameters:
@@ -71,10 +71,13 @@ joint_trajectory_controller:
 
 robotiq_gripper_controller:
   ros__parameters:
-    joint: robotiq_85_left_knuckle_joint
-    action_monitor_rate: 50.0
-    goal_tolerance: 0.02
-    max_effort: 50.0
-    allow_stalling: true
-    stall_velocity_threshold: 0.02
-    stall_timeout: 0.1
+    joints:
+      - robotiq_85_left_knuckle_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
