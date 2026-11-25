@@ -927,11 +927,11 @@ class UR10ePerceptionPickPlaceNode(Node):
     def _capture_segmented_cube_cloud(self, timeout_sec=4.0):
         """
         Stage 2 (Instance Segmentation PointCloud Masking):
-        1. Capture synchronized RGB image and 3D PointCloud2.
-        2. Detect the red cube instance segmentation mask M(u, v) in the 2D image.
-        3. Project the 3D points into the camera optical frame.
-        4. Retain ONLY points whose 2D projection falls inside the segmentation mask.
-        5. Transform the isolated cube points to the world frame.
+        1. Capture synchronized RGB image and 3D PointCloud2, and display the FULL camera FOV
+           PointCloud2 in RViz2 so the user clearly sees the unfiltered scene first.
+        2. Call Instance Segmentation to extract the 2D cube mask M(u, v).
+        3. Project 3D points into the camera optical frame, filter ONLY points inside M(u, v),
+           and display the filtered cube PointCloud2 + 3D bounding box in RViz2.
         Returns: (segmented_cube_points_world, full_scene_world, camera_pos_world, seg_mask_viz)
         """
         self._latest_cloud = None
@@ -950,10 +950,6 @@ class UR10ePerceptionPickPlaceNode(Node):
             return None, None, None, None
 
         img_h, img_w = cv_img.shape[:2]
-        cx, cy, conf, box, seg_mask = self._detect_cube_in_frame(cv_img)
-        if seg_mask is None or np.count_nonzero(seg_mask) < 25:
-            self.get_logger().warning("Instance segmentation found no cube mask in current image.")
-            return None, None, None, None
 
         # Extract 3D points from sensor_msgs/PointCloud2 (raw points in camera link frame)
         cloud_msg = self._latest_cloud
@@ -961,6 +957,50 @@ class UR10ePerceptionPickPlaceNode(Node):
         if len(pts_cam) < 30:
             self.get_logger().error("PointCloud2 contains insufficient points.")
             return None, None, None, None
+
+        # Transform raw camera sensor points (wrist_camera_link: X fwd, Y left, Z up)
+        # to optical frame (Z fwd, X right, Y down):
+        x_opt = -pts_cam[:, 1]
+        y_opt = -pts_cam[:, 2]
+        z_opt = pts_cam[:, 0]
+        valid_depth = (z_opt > 0.05) & (z_opt < 3.0)
+
+        # Convert to world coordinates
+        R_wc, t_wc = self._lookup_world_tf(cloud_msg.header.frame_id)
+        pts_world = pts_cam @ R_wc.T + t_wc
+
+        # Full FOV scene voxelized (4mm) for RViz2 visualization
+        _, uniq_scene = np.unique(np.floor(pts_world[valid_depth] / 0.004).astype(int), axis=0, return_index=True)
+        full_scene_world = pts_world[valid_depth][uniq_scene]
+
+        # --- Visual Step 1: Show FULL Camera FOV PointCloud2 before filtering ---
+        scene_center = np.median(full_scene_world, axis=0)
+        self.get_logger().info(
+            f"[Stage 2 - Step 1/3] Displaying FULL Camera FOV PointCloud2 ({len(full_scene_world)} pts)..."
+        )
+        self._publish_filtering_viz(
+            full_scene_world,
+            scene_center,
+            f"[Step 1/3] Full Camera FOV PointCloud2 ({len(full_scene_world)} pts)",
+            cloud_rgb=(220, 70, 70),
+            bbox_pts=None,
+        )
+        time.sleep(1.8)
+
+        # --- Visual Step 2: Run Instance Segmentation and filter PointCloud2 inside mask ---
+        self.get_logger().info("[Stage 2 - Step 2/3] Running Instance Segmentation to filter PointCloud2...")
+        cx, cy, conf, box, seg_mask = self._detect_cube_in_frame(cv_img)
+        if seg_mask is None or np.count_nonzero(seg_mask) < 25:
+            self._publish_filtering_viz(
+                full_scene_world,
+                scene_center,
+                "[Step 2/3] REJECTED - Instance Segmentation found NO cube in FOV",
+                cloud_rgb=(220, 70, 70),
+                bbox_pts=None,
+            )
+            time.sleep(1.2)
+            self.get_logger().warning("Instance segmentation found no cube mask in current image.")
+            return None, full_scene_world, t_wc, None
 
         # Camera intrinsics K: fx, fy, cx, cy
         if self._camera_info is not None and len(self._camera_info.k) >= 9 and self._camera_info.k[0] > 0.0:
@@ -975,16 +1015,8 @@ class UR10ePerceptionPickPlaceNode(Node):
             cam_cx = img_w / 2.0
             cam_cy = img_h / 2.0
 
-        # Transform raw camera sensor points (wrist_camera_link: X fwd, Y left, Z up)
-        # to optical frame (Z fwd, X right, Y down):
-        x_opt = -pts_cam[:, 1]
-        y_opt = -pts_cam[:, 2]
-        z_opt = pts_cam[:, 0]
-
-        valid_depth = (z_opt > 0.05) & (z_opt < 3.0)
         u = np.zeros(len(pts_cam), dtype=int)
         v = np.zeros(len(pts_cam), dtype=int)
-
         u[valid_depth] = np.round((x_opt[valid_depth] * fx / z_opt[valid_depth]) + cam_cx).astype(int)
         v[valid_depth] = np.round((y_opt[valid_depth] * fy / z_opt[valid_depth]) + cam_cy).astype(int)
 
@@ -993,14 +1025,6 @@ class UR10ePerceptionPickPlaceNode(Node):
         # Mask lookup: retain ONLY points inside the 2D instance segmentation mask
         in_mask = np.zeros(len(pts_cam), dtype=bool)
         in_mask[in_fov] = seg_mask[v[in_fov], u[in_fov]] > 0
-
-        # Convert to world coordinates
-        R_wc, t_wc = self._lookup_world_tf(cloud_msg.header.frame_id)
-        pts_world = pts_cam @ R_wc.T + t_wc
-
-        # Full scene voxelized for background reference in RViz2
-        _, uniq_scene = np.unique(np.floor(pts_world[valid_depth] / 0.005).astype(int), axis=0, return_index=True)
-        full_scene_world = pts_world[valid_depth][uniq_scene]
 
         # Filtered cube points
         cube_pts_raw = pts_world[in_mask]
@@ -1017,10 +1041,22 @@ class UR10ePerceptionPickPlaceNode(Node):
         _, uniq_cube = np.unique(np.floor(cube_pts_world / 0.0025).astype(int), axis=0, return_index=True)
         cube_pts_world = cube_pts_world[uniq_cube]
 
+        kept_pct = 100.0 * len(cube_pts_world) / max(1, len(full_scene_world))
         self.get_logger().info(
             f"[Stage 2 Instance Segmentation Mask] Isolated {len(cube_pts_world)} pure cube points "
-            f"out of {len(pts_cam)} raw scene points ({100.0 * len(cube_pts_world) / max(1, len(pts_cam)):.2f}% kept)"
+            f"out of {len(full_scene_world)} FOV points ({kept_pct:.1f}% kept)"
         )
+
+        # Show ONLY the filtered cube point cloud + green segmentation wireframe in RViz2
+        cube_mean = np.mean(cube_pts_world, axis=0)
+        self._publish_filtering_viz(
+            cube_pts_world,
+            cube_mean,
+            f"[Step 2/3] Instance Seg Filtered -> {len(cube_pts_world)} cube pts ({kept_pct:.1f}% of FOV)",
+            cloud_rgb=(255, 70, 70),
+            bbox_pts=cube_pts_world,
+        )
+        time.sleep(1.6)
 
         # Annotate & save snapshot for visual inspection
         try:
@@ -1155,8 +1191,12 @@ class UR10ePerceptionPickPlaceNode(Node):
         label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
         label.text = text
 
+        del_bbox = Marker()
+        del_bbox.header.frame_id, del_bbox.header.stamp = "world", stamp
+        del_bbox.ns, del_bbox.id, del_bbox.action = "seg_bbox", 3, Marker.DELETE
+
         ma = MarkerArray()
-        ma.markers = [cube, lines, label]
+        ma.markers = [cube, lines, label, del_bbox]
         self._icp_marker_pub.publish(ma)
 
         tfm = TransformStamped()
@@ -1165,6 +1205,64 @@ class UR10ePerceptionPickPlaceNode(Node):
         tfm.transform.rotation.x, tfm.transform.rotation.y = float(q[0]), float(q[1])
         tfm.transform.rotation.z, tfm.transform.rotation.w = float(q[2]), float(q[3])
         self._tf_broadcaster.sendTransform(tfm)
+
+    def _publish_filtering_viz(self, cloud_pts, text_pos, text, cloud_rgb=(220, 70, 70), bbox_pts=None):
+        """Publish target cloud and HUD markers during Stage 2 FOV capture & Instance Segmentation filtering."""
+        stamp = self.get_clock().now().to_msg()
+        vis_pts = cloud_pts[::2] if len(cloud_pts) > 14000 else cloud_pts
+        self._icp_target_pub.publish(self._xyz_to_pc2(vis_pts, cloud_rgb, "world", stamp))
+        # Clear source cloud while showing raw FOV or segmented cloud
+        self._icp_source_pub.publish(self._xyz_to_pc2(np.empty((0, 3)), (40, 190, 255), "world", stamp))
+
+        del_cube = Marker()
+        del_cube.header.frame_id, del_cube.header.stamp = "world", stamp
+        del_cube.ns, del_cube.id, del_cube.action = "icp_cad_model", 0, Marker.DELETE
+
+        del_lines = Marker()
+        del_lines.header.frame_id, del_lines.header.stamp = "world", stamp
+        del_lines.ns, del_lines.id, del_lines.action = "icp_correspondences", 1, Marker.DELETE
+
+        label = Marker()
+        label.header.frame_id, label.header.stamp = "world", stamp
+        label.ns, label.id, label.type, label.action = "icp_text", 2, Marker.TEXT_VIEW_FACING, Marker.ADD
+        label.pose.position.x = float(text_pos[0])
+        label.pose.position.y = float(text_pos[1])
+        label.pose.position.z = float(text_pos[2]) + 0.12
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.026
+        label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+        label.text = text
+
+        bbox_marker = Marker()
+        bbox_marker.header.frame_id, bbox_marker.header.stamp = "world", stamp
+        bbox_marker.ns, bbox_marker.id = "seg_bbox", 3
+        if bbox_pts is not None and len(bbox_pts) >= 4:
+            bbox_marker.type, bbox_marker.action = Marker.LINE_LIST, Marker.ADD
+            bbox_marker.pose.orientation.w = 1.0
+            bbox_marker.scale.x = 0.0022
+            bbox_marker.color = ColorRGBA(r=0.1, g=1.0, b=0.2, a=0.95)
+            mn = np.min(bbox_pts, axis=0) - 0.006
+            mx = np.max(bbox_pts, axis=0) + 0.006
+            c = [
+                [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]],
+                [mx[0], mx[1], mn[2]], [mn[0], mx[1], mn[2]],
+                [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]],
+                [mx[0], mx[1], mx[2]], [mn[0], mx[1], mx[2]],
+            ]
+            edges = [
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ]
+            for i, j in edges:
+                bbox_marker.points.append(Point(x=float(c[i][0]), y=float(c[i][1]), z=float(c[i][2])))
+                bbox_marker.points.append(Point(x=float(c[j][0]), y=float(c[j][1]), z=float(c[j][2])))
+        else:
+            bbox_marker.action = Marker.DELETE
+
+        ma = MarkerArray()
+        ma.markers = [del_cube, del_lines, label, bbox_marker]
+        self._icp_marker_pub.publish(ma)
 
     def estimate_cube_pose_segmented_icp(self):
         """
