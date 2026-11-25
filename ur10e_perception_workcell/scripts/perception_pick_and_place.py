@@ -423,6 +423,10 @@ class UR10ePerceptionPickPlaceNode(Node):
         scene.world.collision_objects.append(remove_world)
         scene.robot_state.is_diff = True
         scene.robot_state.attached_collision_objects.append(aco)
+        oc = ObjectColor()
+        oc.id = "red_cube"
+        oc.color = ColorRGBA(r=0.95, g=0.10, b=0.10, a=1.0)
+        scene.object_colors.append(oc)
         self._planning_scene_pub.publish(scene)
         self.get_logger().info("Attached 'red_cube' to tcp_link in MoveIt PlanningScene")
 
@@ -440,6 +444,40 @@ class UR10ePerceptionPickPlaceNode(Node):
         self._planning_scene_pub.publish(scene)
         time.sleep(0.05)
         self.update_cube_in_planning_scene(place_x, place_y, place_z)
+
+    def _show_cube_visual(self, attached, x=0.0, y=0.0, z=0.825, yaw=0.0):
+        """Always-visible red cube marker in RViz2: follows tcp_link while grasped, fixed in world otherwise."""
+        m = Marker()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns, m.id, m.type, m.action = "cube_visual", 10, Marker.CUBE, Marker.ADD
+        m.scale.x = m.scale.y = m.scale.z = 0.05
+        m.color = ColorRGBA(r=0.95, g=0.10, b=0.10, a=1.0)
+        m.frame_locked = bool(attached)
+        if attached:
+            m.header.frame_id = "tcp_link"
+            m.pose.orientation.w = 1.0
+        else:
+            m.header.frame_id = "world"
+            m.pose.position.x, m.pose.position.y, m.pose.position.z = float(x), float(y), float(z)
+            q = R.from_euler("z", float(yaw)).as_quat()
+            m.pose.orientation.z, m.pose.orientation.w = float(q[2]), float(q[3])
+        ma = MarkerArray()
+        ma.markers = [m]
+        self._icp_marker_pub.publish(ma)
+
+    def _clear_icp_viz(self):
+        """Remove ICP CAD mesh, correspondences, HUD text, bbox and clouds so only the real cube stays visible."""
+        stamp = self.get_clock().now().to_msg()
+        ma = MarkerArray()
+        for ns, mid in (("icp_cad_model", 0), ("icp_correspondences", 1), ("icp_text", 2), ("seg_bbox", 3)):
+            d = Marker()
+            d.header.frame_id, d.header.stamp = "world", stamp
+            d.ns, d.id, d.action = ns, mid, Marker.DELETE
+            ma.markers.append(d)
+        self._icp_marker_pub.publish(ma)
+        empty = np.empty((0, 3))
+        self._icp_target_pub.publish(self._xyz_to_pc2(empty, (220, 70, 70), "world", stamp))
+        self._icp_source_pub.publish(self._xyz_to_pc2(empty, (40, 190, 255), "world", stamp))
 
     def get_gripper_tcp_center(self):
         """Compute current 3D world coordinates of gripper TCP."""
@@ -1730,6 +1768,8 @@ class UR10ePerceptionPickPlaceNode(Node):
 
         # Update detected cube pose in MoveIt PlanningScene
         self.update_cube_in_planning_scene(cube_x, cube_y, cube_z, cube_yaw)
+        self._clear_icp_viz()
+        self._show_cube_visual(False, cube_x, cube_y, cube_z, cube_yaw)
 
         # Compute trajectory waypoints with sequential seeding (gripper rotated by cube yaw)
         self.get_logger().info(
@@ -1797,6 +1837,7 @@ class UR10ePerceptionPickPlaceNode(Node):
         except Exception:
             pass
         self.attach_cube_in_planning_scene()
+        self._show_cube_visual(True)
         time.sleep(0.15)
 
         # Lift cube
@@ -1837,6 +1878,7 @@ class UR10ePerceptionPickPlaceNode(Node):
         except Exception:
             pass
         self.detach_cube_in_planning_scene(place_x, place_y, 0.825)
+        self._show_cube_visual(False, place_x, place_y, 0.825, cube_yaw)
         time.sleep(0.25)
 
         # Retract away from cube
