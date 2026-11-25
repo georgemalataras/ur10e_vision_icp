@@ -1082,7 +1082,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                         best = (rmse, cand_c.copy(), 0.0)
                     if scan_step % viz_stride == 0 or is_new_best:
                         self._publish_icp_viz(
-                            full_scene, src, full_scene[idx], cand_c, 0.0,
+                            full_scene, src, None, cand_c, 0.0,
                             f"[Full-Cloud Brute-Force {scan_step}/{total_grid}] RMSE={rmse:.1f} mm (best={best[0]:.1f} mm)",
                             (1.0, 0.55, 0.05),
                             src_rgb=(255, 165, 30),
@@ -1105,17 +1105,33 @@ class UR10ePerceptionPickPlaceNode(Node):
                         if rmse < best[0]:
                             best = (rmse, cand_c.copy(), yaw_c)
                             self._publish_icp_viz(
-                                full_scene, src, full_scene[idx], cand_c, yaw_c,
+                                full_scene, src, None, cand_c, yaw_c,
                                 f"[Brute-Force Yaw {deg:+d} deg] New Best RMSE={rmse:.2f} mm",
                                 (1.0, 0.70, 0.10),
                                 src_rgb=(255, 190, 40),
                             )
                             time.sleep(delay * 0.45)
 
+        COARSE_THRESHOLD_MM = 11.0
         self.get_logger().info(
             f"Full-Cloud Brute-Force evaluated {total_evals} poses: "
-            f"best=({best[1][0]:.3f}, {best[1][1]:.3f}, {best[1][2]:.3f}), yaw={math.degrees(best[2]):+.1f} deg, RMSE={best[0]:.2f} mm"
+            f"best=({best[1][0]:.3f}, {best[1][1]:.3f}, {best[1][2]:.3f}), yaw={math.degrees(best[2]):+.1f} deg, "
+            f"RMSE={best[0]:.2f} mm (coarse threshold={COARSE_THRESHOLD_MM:.1f} mm)"
         )
+
+        if best[0] >= COARSE_THRESHOLD_MM:
+            src, _ = self._visible_cad_points(best[1], best[2], cam_pos)
+            self._publish_icp_viz(
+                full_scene, src, None, best[1], best[2],
+                f"[REJECTED - NO CUBE IN FOV] Best RMSE={best[0]:.1f} mm >= {COARSE_THRESHOLD_MM:.0f} mm",
+                (1.0, 0.1, 0.1),
+                src_rgb=(255, 40, 40),
+            )
+            time.sleep(1.2)
+            self.get_logger().error(
+                f"Brute-Force best RMSE ({best[0]:.2f} mm) exceeds coarse threshold ({COARSE_THRESHOLD_MM:.1f} mm) — cube not in FOV!"
+            )
+            return None
 
         # --- Stage C: Iterative Closest Point (ICP) directly on the FULL unfiltered scene cloud ---
         center = best[1].copy()
