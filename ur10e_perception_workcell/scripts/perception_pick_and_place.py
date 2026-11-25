@@ -10,9 +10,11 @@ import os
 import sys
 import time
 import math
+import struct
 import numpy as np
 import cv2
 
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import minimize
 
@@ -20,10 +22,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
+from rclpy.qos import qos_profile_sensor_data
 
-from sensor_msgs.msg import Image, JointState, CameraInfo
+from sensor_msgs.msg import Image, JointState, CameraInfo, PointCloud2, PointField
 from std_msgs.msg import Empty, ColorRGBA
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Point, TransformStamped
+from visualization_msgs.msg import Marker, MarkerArray
 from shape_msgs.msg import SolidPrimitive
 from control_msgs.action import GripperCommand, FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -154,23 +158,29 @@ class CalibratedKinematics:
         T = T @ self._tf_mat([0, 0, 0.14], [0, 0, 0])
         return T
 
-    def fk_cam_optical(self, q):
-        """Compute forward kinematics for wrist_camera_optical_frame in world frame."""
+    def fk_cam_link(self, q):
+        """Compute forward kinematics for wrist_camera_link in world frame."""
         T = self.fk_tool0(q)
         T = T @ self._tf_mat([0.095, 0, 0.135], [0, -math.pi / 2.0, 0])
+        return T
+
+    def fk_cam_optical(self, q):
+        """Compute forward kinematics for wrist_camera_optical_frame in world frame."""
+        T = self.fk_cam_link(q)
         T = T @ self._tf_mat([0, 0, 0], [-math.pi / 2.0, 0, -math.pi / 2.0])
         return T
 
-    def solve_ik(self, target_tcp, q_seed=None):
-        """Solve 6D inverse kinematics for target_tcp with vertical downward orientation."""
+    def solve_ik(self, target_tcp, q_seed=None, target_yaw=0.0):
+        """Solve 6D inverse kinematics for target_tcp with vertical downward orientation and yaw."""
         if q_seed is None:
             q_seed = np.array([-0.2063, -1.0972, 1.8092, -2.2828, -1.5708, 1.3645])
         target = np.array(target_tcp, dtype=float)
+        R_des = R.from_euler('z', float(target_yaw)).as_matrix() @ self.R_target
 
         def loss(q):
             T = self.fk_tcp(q)
             pos_err = np.sum((T[:3, 3] - target) ** 2)
-            rot_err = np.sum((T[:3, :3] - self.R_target) ** 2)
+            rot_err = np.sum((T[:3, :3] - R_des) ** 2)
             smooth_err = 0.005 * np.sum((q - q_seed) ** 2)
             return 1200.0 * pos_err + 350.0 * rot_err + smooth_err
 
@@ -180,6 +190,45 @@ class CalibratedKinematics:
         ]
         res = minimize(loss, q_seed, method="SLSQP", bounds=bounds, options={"maxiter": 250, "ftol": 1e-8})
         return res.x
+
+
+def load_stl_cad_faces(stl_path: str, samples_per_axis: int = 11):
+    """
+    Parse ASCII STL triangles from red_cube.stl and sample dense 3D surface points
+    grouped by outward face normal.
+    """
+    normals = []
+    triangles = []
+    with open(stl_path, "r") as f:
+        cur_norm = None
+        cur_verts = []
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            if parts[0] == "facet" and parts[1] == "normal":
+                cur_norm = np.array([float(parts[2]), float(parts[3]), float(parts[4])], dtype=float)
+                cur_verts = []
+            elif parts[0] == "vertex":
+                cur_verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            elif parts[0] == "endfacet" and cur_norm is not None and len(cur_verts) == 3:
+                normals.append(cur_norm)
+                triangles.append(np.array(cur_verts, dtype=float))
+
+    face_map = {}
+    u_lin = np.linspace(0.0, 1.0, samples_per_axis)
+    bary = [(u, v) for u in u_lin for v in u_lin if u + v <= 1.0 + 1e-6]
+    for norm, tri in zip(normals, triangles):
+        key = tuple(np.round(norm, 2))
+        v0, v1, v2 = tri[0], tri[1], tri[2]
+        pts = np.array([v0 + u * (v1 - v0) + v * (v2 - v0) for (u, v) in bary], dtype=float)
+        face_map.setdefault(key, []).append(pts)
+
+    faces = []
+    for key, pts_list in face_map.items():
+        all_pts = np.unique(np.round(np.vstack(pts_list), 6), axis=0)
+        faces.append((all_pts, np.array(key, dtype=float)))
+    return faces
 
 
 class UR10ePerceptionPickPlaceNode(Node):
@@ -255,6 +304,25 @@ class UR10ePerceptionPickPlaceNode(Node):
         self._planning_scene_pub = self.create_publisher(PlanningScene, "/planning_scene", 10)
         self._current_gripper_pos = 0.0
 
+        # ---------------- 3D ICP Pose Estimation Parameters ----------------
+        self.declare_parameter("icp_mode", "segmented")  # "segmented" (Stage 2: Instance Segmentation Mask + Direct ICP) or "unfiltered" (Stage 1: Full Cloud Brute-Force + ICP)
+        self.declare_parameter("icp_step_delay", 0.15)   # seconds between visualized ICP steps
+        self.declare_parameter("icp_max_iters", 30)
+        self._icp_mode = str(self.get_parameter("icp_mode").value).lower()
+        self._icp_step_delay = float(self.get_parameter("icp_step_delay").value)
+        self._icp_max_iters = int(self.get_parameter("icp_max_iters").value)
+
+        self._latest_cloud = None
+        self._cloud_sub = self.create_subscription(
+            PointCloud2, "/wrist_camera/points", self._cloud_callback, qos_profile_sensor_data
+        )
+        self._icp_target_pub = self.create_publisher(PointCloud2, "/icp/target_cloud", 1)
+        self._icp_source_pub = self.create_publisher(PointCloud2, "/icp/source_cloud", 1)
+        self._icp_marker_pub = self.create_publisher(MarkerArray, "/icp/markers", 1)
+        self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        self._cad_half = 0.025
+        self._cad_faces = self._load_cad_model()
+
         self.get_logger().info("Connecting to MoveGroup action server...")
         if not self._move_group_client.wait_for_server(timeout_sec=35.0):
             self.get_logger().error("MoveGroup action server unavailable. Aborting.")
@@ -281,8 +349,8 @@ class UR10ePerceptionPickPlaceNode(Node):
             self._has_gripper = False
             self.get_logger().warning("Gripper controller unavailable (simulation mode).")
 
-    def update_cube_in_planning_scene(self, x: float, y: float, z: float = 0.825):
-        """Update red_cube CollisionObject position in MoveIt PlanningScene."""
+    def update_cube_in_planning_scene(self, x: float, y: float, z: float = 0.825, yaw: float = 0.0):
+        """Update red_cube CollisionObject pose (position + yaw) in MoveIt PlanningScene."""
         co = CollisionObject()
         co.header.frame_id = "world"
         co.header.stamp = self.get_clock().now().to_msg()
@@ -297,7 +365,9 @@ class UR10ePerceptionPickPlaceNode(Node):
         pose.position.x = float(x)
         pose.position.y = float(y)
         pose.position.z = float(z)
-        pose.orientation.w = 1.0
+        qz = R.from_euler("z", float(yaw)).as_quat()
+        pose.orientation.z = float(qz[2])
+        pose.orientation.w = float(qz[3])
 
         co.primitives.append(box)
         co.primitive_poses.append(pose)
@@ -582,18 +652,20 @@ class UR10ePerceptionPickPlaceNode(Node):
         self.get_logger().error(f"Failed to reach {pose_name} after {max_retries} attempts.")
         return False
 
-    def solve_ik_target(self, target_pos, q_seed=None):
-        """Compute deterministic 6D IK using CalibratedKinematics."""
+    def solve_ik_target(self, target_pos, q_seed=None, yaw=0.0):
+        """Compute deterministic 6D IK using CalibratedKinematics (top-down grasp rotated by yaw)."""
         if q_seed is None:
             q_seed = self._current_joints
-        return list(self._kinematics.solve_ik(target_pos, q_seed=q_seed))
+        return list(self._kinematics.solve_ik(target_pos, q_seed=q_seed, target_yaw=yaw))
 
     def _detect_cube_in_frame(self, cv_img):
         """
-        Detect red cube top face centroid using HSV segmentation with YOLO fallback.
-        Returns: (cx, cy, conf, best_box) or (None, None, 0.0, None)
+        Detect red cube top face centroid and 2D segmentation mask using HSV color segmentation with YOLO fallback.
+        Returns: (cx, cy, conf, best_box, seg_mask)
         """
         cx, cy, conf, best_box = None, None, 0.0, None
+        h, w = cv_img.shape[:2]
+        seg_mask = np.zeros((h, w), dtype=np.uint8)
 
         hsv = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
         m1 = cv2.inRange(hsv, np.array([0, 80, 50]), np.array([15, 255, 255]))
@@ -610,6 +682,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                 conf = 0.95
                 bx, by, bw, bh = cv2.boundingRect(largest)
                 best_box = [bx, by, bx + bw, by + bh]
+                cv2.drawContours(seg_mask, [largest], -1, 255, -1)
 
         if cx is None and self._yolo is not None:
             try:
@@ -626,10 +699,17 @@ class UR10ePerceptionPickPlaceNode(Node):
                     cy = float((xyxy[1] + xyxy[3]) / 2.0)
                     conf = float(best_box_item.conf[0])
                     best_box = xyxy
+                    # If YOLO provides masks (YOLO-seg)
+                    if hasattr(results[0], "masks") and results[0].masks is not None:
+                        m_raw = results[0].masks.data[0].cpu().numpy()
+                        seg_mask = (cv2.resize(m_raw, (w, h), interpolation=cv2.INTER_NEAREST) > 0.5).astype(np.uint8) * 255
+                    else:
+                        x1, y1, x2, y2 = [int(v) for v in best_box]
+                        seg_mask[max(0, y1):min(h, y2), max(0, x1):min(w, x2)] = 255
             except Exception as e:
                 self.get_logger().warning(f"YOLO inference exception: {e}")
 
-        return cx, cy, conf, best_box
+        return cx, cy, conf, best_box, seg_mask
 
     def _ray_plane_intersect(self, u, v, width, height, target_z=0.825):
         """Intersect camera optical ray with horizontal plane Z = target_z."""
@@ -699,7 +779,7 @@ class UR10ePerceptionPickPlaceNode(Node):
                 continue
 
             h, w, _ = cv_img.shape
-            cx, cy, conf, box = self._detect_cube_in_frame(cv_img)
+            cx, cy, conf, box, _ = self._detect_cube_in_frame(cv_img)
 
             if cx is not None and cy is not None:
                 world_x, world_y = self._ray_plane_intersect(cx, cy, w, h, target_z=target_z)
@@ -760,6 +840,737 @@ class UR10ePerceptionPickPlaceNode(Node):
             self.get_logger().warning(f"Failed to save snapshot: {e}")
 
         return best_x, best_y, 0.825
+
+    # =====================================================================
+    # Phase 1: 3D ICP Pose Estimation (CAD model <-> RGB-D PointCloud2)
+    # =====================================================================
+    TABLE_TOP_Z = 0.80
+
+    def _load_cad_model(self):
+        """Load red_cube.stl CAD model and sample its surface faces."""
+        rel = os.path.join("models", "red_cube", "meshes", "red_cube.stl")
+        candidates = [os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), rel)]
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            candidates.append(os.path.join(get_package_share_directory("ur10e_perception_workcell"), rel))
+        except Exception:
+            pass
+        for path in candidates:
+            if os.path.exists(path):
+                faces = load_stl_cad_faces(path)
+                all_pts = np.vstack([f[0] for f in faces])
+                self._cad_half = float(np.max(np.abs(all_pts)))
+                self.get_logger().info(
+                    f"Loaded CAD model {path}: {len(faces)} faces, {len(all_pts)} surface points, "
+                    f"edge={2 * self._cad_half * 1000:.0f} mm"
+                )
+                return faces
+        self.get_logger().error("CAD model red_cube.stl not found! ICP disabled.")
+        return []
+
+    def _cloud_callback(self, msg: PointCloud2):
+        self._latest_cloud = msg
+
+    @staticmethod
+    def _pc2_to_xyz(msg: PointCloud2) -> np.ndarray:
+        """Fast numpy conversion of a sensor_msgs/PointCloud2 to an (N,3) float64 array."""
+        offsets = {f.name: f.offset for f in msg.fields}
+        n = msg.width * msg.height
+        if n == 0 or not all(k in offsets for k in ("x", "y", "z")):
+            return np.empty((0, 3))
+        raw = np.frombuffer(msg.data, dtype=np.uint8)[: msg.row_step * msg.height]
+        raw = raw.reshape(msg.height, msg.row_step)[:, : msg.width * msg.point_step].reshape(n, msg.point_step)
+        dt = np.dtype(">f4") if msg.is_bigendian else np.dtype("<f4")
+        xyz = np.stack(
+            [raw[:, offsets[k]:offsets[k] + 4].copy().view(dt).reshape(n) for k in ("x", "y", "z")], axis=1
+        ).astype(np.float64)
+        return xyz[np.isfinite(xyz).all(axis=1)]
+
+    @staticmethod
+    def _xyz_to_pc2(points, rgb, frame_id, stamp) -> PointCloud2:
+        """Pack an (N,3) array into a colored PointCloud2 (x, y, z, rgb)."""
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        n = len(pts)
+        rgb_u32 = (int(rgb[0]) << 16) | (int(rgb[1]) << 8) | int(rgb[2])
+        rgb_f = struct.unpack("f", struct.pack("I", rgb_u32))[0]
+        data = np.zeros((n, 4), dtype=np.float32)
+        if n:
+            data[:, :3] = pts
+            data[:, 3] = rgb_f
+        msg = PointCloud2()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = stamp
+        msg.height, msg.width = 1, n
+        msg.fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        msg.is_bigendian = False
+        msg.point_step, msg.row_step = 16, 16 * n
+        msg.is_dense = True
+        msg.data = data.tobytes()
+        return msg
+
+    def _lookup_world_tf(self, frame_id):
+        """Return (R, t) mapping points from frame_id to world (TF, with FK fallback)."""
+        try:
+            tf = self._tf_buffer.lookup_transform("world", frame_id, rclpy.time.Time(), timeout=Duration(seconds=1.0))
+            tr, q = tf.transform.translation, tf.transform.rotation
+            return R.from_quat([q.x, q.y, q.z, q.w]).as_matrix(), np.array([tr.x, tr.y, tr.z])
+        except Exception as e:
+            self.get_logger().warning(f"TF world<-{frame_id} unavailable ({e}); using FK of wrist_camera_link.")
+            T = self._kinematics.fk_cam_link(self._current_joints)
+            return T[:3, :3], T[:3, 3]
+
+    def _capture_segmented_cube_cloud(self, timeout_sec=4.0):
+        """
+        Stage 2 (Instance Segmentation PointCloud Masking):
+        1. Capture synchronized RGB image and 3D PointCloud2, and display the FULL camera FOV
+           PointCloud2 in RViz2 so the user clearly sees the unfiltered scene first.
+        2. Call Instance Segmentation to extract the 2D cube mask M(u, v).
+        3. Project 3D points into the camera optical frame, filter ONLY points inside M(u, v),
+           and display the filtered cube PointCloud2 + 3D bounding box in RViz2.
+        Returns: (segmented_cube_points_world, full_scene_world, camera_pos_world, seg_mask_viz)
+        """
+        self._latest_cloud = None
+        t0 = time.time()
+        while (self._latest_cloud is None or self._latest_image is None) and (time.time() - t0 < timeout_sec):
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        if self._latest_cloud is None or self._latest_image is None:
+            self.get_logger().error("Did not receive synchronized Image and PointCloud2.")
+            return None, None, None, None
+
+        try:
+            cv_img = self._cv_bridge.imgmsg_to_cv2(self._latest_image, desired_encoding="bgr8")
+        except Exception as e:
+            self.get_logger().error(f"Failed to convert camera image: {e}")
+            return None, None, None, None
+
+        img_h, img_w = cv_img.shape[:2]
+
+        # Extract 3D points from sensor_msgs/PointCloud2 (raw points in camera link frame)
+        cloud_msg = self._latest_cloud
+        pts_cam = self._pc2_to_xyz(cloud_msg)
+        if len(pts_cam) < 30:
+            self.get_logger().error("PointCloud2 contains insufficient points.")
+            return None, None, None, None
+
+        # Transform raw camera sensor points (wrist_camera_link: X fwd, Y left, Z up)
+        # to optical frame (Z fwd, X right, Y down):
+        x_opt = -pts_cam[:, 1]
+        y_opt = -pts_cam[:, 2]
+        z_opt = pts_cam[:, 0]
+        valid_depth = (z_opt > 0.05) & (z_opt < 3.0)
+
+        # Convert to world coordinates
+        R_wc, t_wc = self._lookup_world_tf(cloud_msg.header.frame_id)
+        pts_world = pts_cam @ R_wc.T + t_wc
+
+        # Full FOV scene voxelized (4mm) for RViz2 visualization
+        _, uniq_scene = np.unique(np.floor(pts_world[valid_depth] / 0.004).astype(int), axis=0, return_index=True)
+        full_scene_world = pts_world[valid_depth][uniq_scene]
+
+        # --- Visual Step 1: Show FULL Camera FOV PointCloud2 before filtering ---
+        scene_center = np.median(full_scene_world, axis=0)
+        self.get_logger().info(
+            f"[Stage 2 - Step 1/3] Displaying FULL Camera FOV PointCloud2 ({len(full_scene_world)} pts)..."
+        )
+        self._publish_filtering_viz(
+            full_scene_world,
+            scene_center,
+            f"[Step 1/3] Full Camera FOV PointCloud2 ({len(full_scene_world)} pts)",
+            cloud_rgb=(220, 70, 70),
+            bbox_pts=None,
+        )
+        time.sleep(1.8)
+
+        # --- Visual Step 2: Run Instance Segmentation and filter PointCloud2 inside mask ---
+        self.get_logger().info("[Stage 2 - Step 2/3] Running Instance Segmentation to filter PointCloud2...")
+        cx, cy, conf, box, seg_mask = self._detect_cube_in_frame(cv_img)
+        if seg_mask is None or np.count_nonzero(seg_mask) < 25:
+            self._publish_filtering_viz(
+                full_scene_world,
+                scene_center,
+                "[Step 2/3] REJECTED - Instance Segmentation found NO cube in FOV",
+                cloud_rgb=(220, 70, 70),
+                bbox_pts=None,
+            )
+            time.sleep(1.2)
+            self.get_logger().warning("Instance segmentation found no cube mask in current image.")
+            return None, full_scene_world, t_wc, None
+
+        # Camera intrinsics K: fx, fy, cx, cy
+        if self._camera_info is not None and len(self._camera_info.k) >= 9 and self._camera_info.k[0] > 0.0:
+            fx = float(self._camera_info.k[0])
+            fy = float(self._camera_info.k[4])
+            cam_cx = float(self._camera_info.k[2])
+            cam_cy = float(self._camera_info.k[5])
+        else:
+            hfov = 1.2
+            fx = (img_w / 2.0) / math.tan(hfov / 2.0)
+            fy = fx
+            cam_cx = img_w / 2.0
+            cam_cy = img_h / 2.0
+
+        u = np.zeros(len(pts_cam), dtype=int)
+        v = np.zeros(len(pts_cam), dtype=int)
+        u[valid_depth] = np.round((x_opt[valid_depth] * fx / z_opt[valid_depth]) + cam_cx).astype(int)
+        v[valid_depth] = np.round((y_opt[valid_depth] * fy / z_opt[valid_depth]) + cam_cy).astype(int)
+
+        in_fov = valid_depth & (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
+
+        # Mask lookup: retain ONLY points inside the 2D instance segmentation mask
+        in_mask = np.zeros(len(pts_cam), dtype=bool)
+        in_mask[in_fov] = seg_mask[v[in_fov], u[in_fov]] > 0
+
+        # Filtered cube points
+        cube_pts_raw = pts_world[in_mask]
+        # Reject any stray background points outside the table elevation workspace [0.79, 0.95]
+        cube_pts_world = cube_pts_raw[(cube_pts_raw[:, 2] > 0.79) & (cube_pts_raw[:, 2] < 0.95)]
+
+        if len(cube_pts_world) < 20:
+            self.get_logger().warning(
+                f"Segmented cloud has only {len(cube_pts_world)} 3D points inside mask. Retrying..."
+            )
+            return None, full_scene_world, t_wc, None
+
+        # Voxel downsampling (2mm) for balanced point distribution across top and sides
+        _, uniq_cube = np.unique(np.floor(cube_pts_world / 0.002).astype(int), axis=0, return_index=True)
+        cube_pts_world = cube_pts_world[uniq_cube]
+
+        kept_pct = 100.0 * len(cube_pts_world) / max(1, len(full_scene_world))
+        self.get_logger().info(
+            f"[Stage 2 Instance Segmentation Mask] Isolated {len(cube_pts_world)} pure cube points "
+            f"out of {len(full_scene_world)} FOV points ({kept_pct:.1f}% kept)"
+        )
+
+        # Show ONLY the filtered cube point cloud + green segmentation wireframe in RViz2
+        cube_mean = np.mean(cube_pts_world, axis=0)
+        self._publish_filtering_viz(
+            cube_pts_world,
+            cube_mean,
+            f"[Step 2/3] Instance Seg Filtered -> {len(cube_pts_world)} cube pts ({kept_pct:.1f}% of FOV)",
+            cloud_rgb=(255, 70, 70),
+            bbox_pts=cube_pts_world,
+        )
+        time.sleep(1.6)
+
+        # Annotate & save snapshot for visual inspection
+        try:
+            annotated = cv_img.copy()
+            if box is not None:
+                x1, y1, x2, y2 = [int(p) for p in box]
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Overlay segmentation mask in translucent green
+            mask_rgb = np.zeros_like(annotated)
+            mask_rgb[seg_mask > 0] = [0, 255, 0]
+            annotated = cv2.addWeighted(annotated, 0.75, mask_rgb, 0.25, 0)
+            cv2.putText(
+                annotated,
+                f"Instance Seg: {len(cube_pts_world)} 3D points",
+                (20, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2
+            )
+            cv2.imwrite("/tmp/instance_segmentation_mask.jpg", annotated)
+        except Exception:
+            pass
+
+        return cube_pts_world, full_scene_world, t_wc, seg_mask
+
+    def _capture_full_scene_cloud(self, timeout_sec=4.0):
+        """
+        Phase 1 (Unfiltered Full-Scene Cloud):
+        Grab the ENTIRE RGB-D PointCloud2 from /wrist_camera/points and transform it to
+        the world frame WITHOUT removing the table plane or masking the cube.
+        Applies only a light 4mm 3D voxel grid so KDTree & RViz2 stay responsive.
+        Returns (full_scene_points_world, camera_position_world) or (None, None).
+        """
+        self._latest_cloud = None
+        t0 = time.time()
+        while self._latest_cloud is None and time.time() - t0 < timeout_sec:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        if self._latest_cloud is None:
+            self.get_logger().error("No PointCloud2 received on /wrist_camera/points.")
+            return None, None
+
+        msg = self._latest_cloud
+        pts = self._pc2_to_xyz(msg)
+        d = np.linalg.norm(pts, axis=1)
+        pts = pts[(d > 0.05) & (d < 3.0)]
+        R_wc, t_wc = self._lookup_world_tf(msg.header.frame_id)
+        pts_w = pts @ R_wc.T + t_wc
+
+        if len(pts_w) < 50:
+            self.get_logger().error("PointCloud2 has insufficient valid 3D points.")
+            return None, None
+
+        # Keep the ENTIRE scene (table + cube + background), only 4mm voxel-downsampled
+        _, uniq_idx = np.unique(np.floor(pts_w / 0.004).astype(int), axis=0, return_index=True)
+        full_scene = pts_w[uniq_idx]
+        self.get_logger().info(
+            f"Full Unfiltered PointCloud2: {len(pts_w)} raw pts -> {len(full_scene)} voxel pts "
+            f"(table + cube included, frame '{msg.header.frame_id}')"
+        )
+        return full_scene, t_wc
+
+    def _visible_cad_points(self, center, yaw, cam_pos):
+        """Transform the CAD model to (center, yaw) and return (visible_pts, outward_normals)."""
+        Rz = R.from_euler("z", yaw).as_matrix()
+        pts, norms = [], []
+        for f_pts, f_n in self._cad_faces:
+            n_w = Rz @ f_n
+            if n_w[2] < -0.5:  # bottom face rests on the table -> never visible
+                continue
+            face_c = Rz @ (f_n * self._cad_half) + center
+            v_cam = cam_pos - face_c
+            v_cam /= max(np.linalg.norm(v_cam), 1e-6)
+            if np.dot(n_w, v_cam) > 0.05:
+                pw = f_pts @ Rz.T + center
+                pts.append(pw)
+                norms.append(np.tile(n_w, (len(pw), 1)))
+        if not pts:
+            return np.empty((0, 3)), np.empty((0, 3))
+        return np.vstack(pts), np.vstack(norms)
+
+    @staticmethod
+    def _wrap_yaw(yaw):
+        """Cube has 90 deg symmetry about Z -> wrap yaw into [-45, 45) deg."""
+        return ((yaw + math.pi / 4.0) % (math.pi / 2.0)) - math.pi / 4.0
+
+    @staticmethod
+    def _model_to_scene_rmse(source, tree_scene):
+        """One-sided Model-to-Scene RMSE (mm) from visible CAD points to the full scene cloud."""
+        d_st, idx = tree_scene.query(source)
+        rmse = math.sqrt(float(np.mean(d_st ** 2))) * 1000.0
+        return rmse, d_st, idx
+
+    def _publish_icp_viz(self, target, source, matched, center, yaw, text, color, src_rgb=(40, 190, 255)):
+        """Publish full target/source clouds, 3D STL CAD mesh marker, correspondence 'rubber bands', text and TF."""
+        stamp = self.get_clock().now().to_msg()
+        # Subsample full target cloud lightly for RViz2 marker rate if very large
+        tgt_vis = target[::2] if len(target) > 12000 else target
+        self._icp_target_pub.publish(self._xyz_to_pc2(tgt_vis, (220, 70, 70), "world", stamp))
+        self._icp_source_pub.publish(self._xyz_to_pc2(source, src_rgb, "world", stamp))
+        q = R.from_euler("z", yaw).as_quat()
+
+        cube = Marker()
+        cube.header.frame_id, cube.header.stamp = "world", stamp
+        cube.ns, cube.id, cube.type, cube.action = "icp_cad_model", 0, Marker.MESH_RESOURCE, Marker.ADD
+        cube.mesh_resource = "package://ur10e_perception_workcell/models/red_cube/meshes/red_cube.stl"
+        cube.pose.position.x, cube.pose.position.y, cube.pose.position.z = map(float, center)
+        cube.pose.orientation.x, cube.pose.orientation.y = float(q[0]), float(q[1])
+        cube.pose.orientation.z, cube.pose.orientation.w = float(q[2]), float(q[3])
+        cube.scale.x = cube.scale.y = cube.scale.z = 1.0
+        cube.color = ColorRGBA(r=float(color[0]), g=float(color[1]), b=float(color[2]), a=0.65)
+
+        lines = Marker()
+        lines.header.frame_id, lines.header.stamp = "world", stamp
+        lines.ns, lines.id, lines.type, lines.action = "icp_correspondences", 1, Marker.LINE_LIST, Marker.ADD
+        lines.pose.orientation.w = 1.0
+        lines.scale.x = 0.0012
+        lines.color = ColorRGBA(r=1.0, g=0.9, b=0.1, a=0.85)
+        if matched is not None and len(source):
+            step = max(1, len(source) // 120)
+            for s, t in zip(source[::step], matched[::step]):
+                lines.points.append(Point(x=float(s[0]), y=float(s[1]), z=float(s[2])))
+                lines.points.append(Point(x=float(t[0]), y=float(t[1]), z=float(t[2])))
+
+        label = Marker()
+        label.header.frame_id, label.header.stamp = "world", stamp
+        label.ns, label.id, label.type, label.action = "icp_text", 2, Marker.TEXT_VIEW_FACING, Marker.ADD
+        label.pose.position.x, label.pose.position.y = float(center[0]), float(center[1])
+        label.pose.position.z = float(center[2]) + 0.10
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.024
+        label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+        label.text = text
+
+        del_bbox = Marker()
+        del_bbox.header.frame_id, del_bbox.header.stamp = "world", stamp
+        del_bbox.ns, del_bbox.id, del_bbox.action = "seg_bbox", 3, Marker.DELETE
+
+        ma = MarkerArray()
+        ma.markers = [cube, lines, label, del_bbox]
+        self._icp_marker_pub.publish(ma)
+
+        tfm = TransformStamped()
+        tfm.header.frame_id, tfm.header.stamp, tfm.child_frame_id = "world", stamp, "icp_cube_pose"
+        tfm.transform.translation.x, tfm.transform.translation.y, tfm.transform.translation.z = map(float, center)
+        tfm.transform.rotation.x, tfm.transform.rotation.y = float(q[0]), float(q[1])
+        tfm.transform.rotation.z, tfm.transform.rotation.w = float(q[2]), float(q[3])
+        self._tf_broadcaster.sendTransform(tfm)
+
+    def _publish_filtering_viz(self, cloud_pts, text_pos, text, cloud_rgb=(220, 70, 70), bbox_pts=None):
+        """Publish target cloud and HUD markers during Stage 2 FOV capture & Instance Segmentation filtering."""
+        stamp = self.get_clock().now().to_msg()
+        vis_pts = cloud_pts[::2] if len(cloud_pts) > 14000 else cloud_pts
+        self._icp_target_pub.publish(self._xyz_to_pc2(vis_pts, cloud_rgb, "world", stamp))
+        # Clear source cloud while showing raw FOV or segmented cloud
+        self._icp_source_pub.publish(self._xyz_to_pc2(np.empty((0, 3)), (40, 190, 255), "world", stamp))
+
+        del_cube = Marker()
+        del_cube.header.frame_id, del_cube.header.stamp = "world", stamp
+        del_cube.ns, del_cube.id, del_cube.action = "icp_cad_model", 0, Marker.DELETE
+
+        del_lines = Marker()
+        del_lines.header.frame_id, del_lines.header.stamp = "world", stamp
+        del_lines.ns, del_lines.id, del_lines.action = "icp_correspondences", 1, Marker.DELETE
+
+        label = Marker()
+        label.header.frame_id, label.header.stamp = "world", stamp
+        label.ns, label.id, label.type, label.action = "icp_text", 2, Marker.TEXT_VIEW_FACING, Marker.ADD
+        label.pose.position.x = float(text_pos[0])
+        label.pose.position.y = float(text_pos[1])
+        label.pose.position.z = float(text_pos[2]) + 0.12
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.026
+        label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+        label.text = text
+
+        bbox_marker = Marker()
+        bbox_marker.header.frame_id, bbox_marker.header.stamp = "world", stamp
+        bbox_marker.ns, bbox_marker.id = "seg_bbox", 3
+        if bbox_pts is not None and len(bbox_pts) >= 4:
+            bbox_marker.type, bbox_marker.action = Marker.LINE_LIST, Marker.ADD
+            bbox_marker.pose.orientation.w = 1.0
+            bbox_marker.scale.x = 0.0022
+            bbox_marker.color = ColorRGBA(r=0.1, g=1.0, b=0.2, a=0.95)
+            mn = np.min(bbox_pts, axis=0) - 0.006
+            mx = np.max(bbox_pts, axis=0) + 0.006
+            c = [
+                [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]],
+                [mx[0], mx[1], mn[2]], [mn[0], mx[1], mn[2]],
+                [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]],
+                [mx[0], mx[1], mx[2]], [mn[0], mx[1], mx[2]],
+            ]
+            edges = [
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ]
+            for i, j in edges:
+                bbox_marker.points.append(Point(x=float(c[i][0]), y=float(c[i][1]), z=float(c[i][2])))
+                bbox_marker.points.append(Point(x=float(c[j][0]), y=float(c[j][1]), z=float(c[j][2])))
+        else:
+            bbox_marker.action = Marker.DELETE
+
+        ma = MarkerArray()
+        ma.markers = [del_cube, del_lines, label, bbox_marker]
+        self._icp_marker_pub.publish(ma)
+
+    def estimate_cube_pose_segmented_icp(self):
+        """
+        Stage 2 (Instance Segmentation Point Cloud Filter + 100% Pure ICP Matching):
+          1. Captures camera image and PointCloud2, applies 2D instance segmentation mask,
+             and isolates ONLY the 3D points belonging to the red cube (zero table points!).
+          2. Directly initializes the CAD model at the segmented point cloud centroid:
+             no brute force table sweep needed!
+          3. Runs Symmetric Point-to-Plane ICP between the 3D CAD model (red_cube.stl)
+             and the segmented cube point cloud for 100% accurate 6D pose estimation (X, Y, Z, Yaw).
+        Returns: (x, y, z, yaw) in world frame or None.
+        """
+        if not self._cad_faces:
+            return None
+
+        cube_pts, full_scene, cam_pos, seg_mask = self._capture_segmented_cube_cloud()
+        if cube_pts is None or len(cube_pts) < 20:
+            self.get_logger().error("Stage 2: Failed to isolate cube point cloud from instance segmentation mask.")
+            return None
+
+        t_start = time.time()
+        delay = self._icp_step_delay
+        tree_target = cKDTree(cube_pts)
+
+        # Direct Centroid Initialization (No Brute-Force Sweep)
+        mean_pt = np.mean(cube_pts, axis=0)
+        # Table top is at Z=0.80, cube edge is 0.05m -> nominal center Z is 0.825m
+        center = np.array([float(mean_pt[0]), float(mean_pt[1]), 0.825])
+        yaw = 0.0
+
+        # Quick direct yaw orientation alignment around centroid
+        best_yaw = 0.0
+        best_init_rmse = float("inf")
+        for deg in range(-45, 45, 5):
+            cand_yaw = math.radians(deg)
+            src_init, _ = self._visible_cad_points(center, cand_yaw, cam_pos)
+            if not len(src_init):
+                continue
+            dists_init, _ = tree_target.query(src_init)
+            init_rmse = math.sqrt(float(np.mean(dists_init ** 2))) * 1000.0
+            if init_rmse < best_init_rmse:
+                best_init_rmse = init_rmse
+                best_yaw = cand_yaw
+
+        yaw = best_yaw
+        src_init, _ = self._visible_cad_points(center, yaw, cam_pos)
+        self.get_logger().info(
+            f"[Stage 2 ICP Init] Direct centroid: ({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}) | "
+            f"Init Yaw: {math.degrees(yaw):+.1f} deg | Init RMSE: {best_init_rmse:.2f} mm"
+        )
+        self._publish_icp_viz(
+            cube_pts, src_init, None, center, yaw,
+            f"[Stage 2 Seg-ICP Init] Direct Centroid Init | RMSE={best_init_rmse:.2f} mm",
+            (1.0, 0.75, 0.1),
+            src_rgb=(255, 180, 20),
+        )
+        time.sleep(delay * 0.8)
+
+        # Iterative Closest Point (ICP) directly on segmented cube points
+        n_iters = max(self._icp_max_iters, 25)
+        prev_rmse = float("inf")
+        rmse = best_init_rmse
+
+        for it in range(1, n_iters + 1):
+            src, norms = self._visible_cad_points(center, yaw, cam_pos)
+            if not len(src):
+                break
+
+            # Symmetric correspondences: CAD -> Cube points and Cube -> CAD points
+            dists_st, idx_t = tree_target.query(src)
+            matched_pts = cube_pts[idx_t]
+
+            # Bidirectional distance check for robust outlier rejection
+            tree_src = cKDTree(src)
+            dists_ts, _ = tree_src.query(cube_pts)
+            sym_rmse = math.sqrt(0.5 * (float(np.mean(dists_st ** 2)) + float(np.mean(dists_ts ** 2)))) * 1000.0
+            rmse = sym_rmse
+
+            # Point-to-Plane linear system
+            keep = dists_st < max(2.5 * float(np.median(dists_st)), 0.005)
+            s_k, t_k, n_k = src[keep], matched_pts[keep], norms[keep]
+
+            rel = s_k - center
+            rot_jac = (-rel[:, 1] * n_k[:, 0]) + (rel[:, 0] * n_k[:, 1])
+            A_pl = np.column_stack([n_k[:, 0], n_k[:, 1], n_k[:, 2], rot_jac])
+            b_pl = np.sum((t_k - s_k) * n_k, axis=1)
+
+            # Center-of-mass anchor to prevent planar sliding
+            mu_s = s_k.mean(axis=0)
+            mu_t = t_k.mean(axis=0)
+            w_com = 0.20
+            A_com = np.array([
+                [w_com, 0.0, 0.0, 0.0],
+                [0.0, w_com, 0.0, 0.0],
+                [0.0, 0.0, w_com, 0.0]
+            ])
+            b_com = (mu_t - mu_s) * w_com
+
+            A = np.vstack([A_pl, A_com])
+            b = np.concatenate([b_pl, b_com])
+
+            ATA = A.T @ A + np.diag([1e-4, 1e-4, 1e-4, 1e-5])
+            delta = np.linalg.solve(ATA, A.T @ b)
+
+            alpha = 0.65
+            center = center + alpha * delta[:3]
+            # Keep Z physically resting on table
+            center[2] = float(np.clip(center[2], 0.818, 0.835))
+            yaw = self._wrap_yaw(yaw + alpha * delta[3])
+
+            self._publish_icp_viz(
+                cube_pts, src, matched_pts, center, yaw,
+                f"[Stage 2 Seg-ICP {it}/{n_iters}] RMSE={rmse:.2f} mm | Pos=({center[0]:.3f},{center[1]:.3f},{center[2]:.3f}) | Yaw={math.degrees(yaw):+.1f} deg",
+                (0.10, 0.70, 1.0),
+                src_rgb=(30, 200, 255),
+            )
+            time.sleep(delay)
+
+            if it > 8 and abs(prev_rmse - rmse) < 0.005:
+                break
+            prev_rmse = rmse
+
+        # Final converged state
+        src_final, _ = self._visible_cad_points(center, yaw, cam_pos)
+        dists_final, idx_final = tree_target.query(src_final)
+        tree_src_final = cKDTree(src_final)
+        dists_ts_final, _ = tree_src_final.query(cube_pts)
+        final_rmse = math.sqrt(0.5 * (float(np.mean(dists_final ** 2)) + float(np.mean(dists_ts_final ** 2)))) * 1000.0
+        elapsed_compute = time.time() - t_start
+
+        ok = final_rmse < 8.0
+        self._publish_icp_viz(
+            cube_pts, src_final, cube_pts[idx_final], center, yaw,
+            f"[Stage 2 Seg-ICP {'LOCKED (100% MATCH)' if ok else 'POOR FIT'}] RMSE={final_rmse:.2f} mm | "
+            f"({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}) Yaw={math.degrees(yaw):+.1f} deg",
+            (0.05, 0.95, 0.20) if ok else (1.0, 0.1, 0.1),
+            src_rgb=(40, 255, 90) if ok else (255, 40, 40),
+        )
+        time.sleep(1.2)
+        self.get_logger().info(
+            f"Stage 2 Segmented ICP finished (compute time {elapsed_compute:.2f}s): "
+            f"X={center[0]:.4f} Y={center[1]:.4f} Z={center[2]:.4f} m, "
+            f"yaw={math.degrees(yaw):+.2f} deg, RMSE={final_rmse:.2f} mm ({'LOCKED' if ok else 'REJECTED'})"
+        )
+        if not ok:
+            return None
+        return float(center[0]), float(center[1]), float(center[2]), float(yaw)
+
+    def estimate_cube_pose_icp(self):
+        """
+        Phase 1 — Full Unfiltered PointCloud Brute-Force + ICP Pose Estimation:
+          A) Takes the ENTIRE camera PointCloud2 (table + cube + scene, NO filtering/masking!).
+          B) Slides the 3D CAD cube across a 3D grid over the full scene cloud (Brute-Force search),
+             visualizing how the CAD model scans across the table until its 3D faces match the protruding cube.
+          C) Runs Point-to-Plane ICP directly against the full unfiltered scene cloud to refine (x, y, z, yaw).
+        Returns (x, y, z, yaw) in world frame or None.
+        """
+        if not self._cad_faces:
+            return None
+        full_scene, cam_pos = self._capture_full_scene_cloud()
+        if full_scene is None:
+            return None
+
+        t_start = time.time()
+        tree_scene = cKDTree(full_scene)
+        delay = self._icp_step_delay
+
+        # Compute 3D search volume directly from the observed full camera cloud percentiles
+        p_min = np.percentile(full_scene, 5, axis=0)
+        p_max = np.percentile(full_scene, 95, axis=0)
+        z_top = float(np.max(full_scene[:, 2]))
+        xs = np.arange(p_min[0] + 0.04, p_max[0] - 0.04, 0.035)
+        ys = np.arange(p_min[1] + 0.04, p_max[1] - 0.04, 0.035)
+        zs = np.unique(np.round(np.linspace(p_min[2] + 0.02, max(p_min[2] + 0.03, z_top - 0.015), 3), 3))
+
+        best = (float("inf"), np.array([float(np.median(full_scene[:, 0])), 0.0, 0.825]), 0.0)
+        total_evals = 0
+        scan_step = 0
+        total_grid = max(1, len(xs) * len(ys) * len(zs))
+        viz_stride = max(1, total_grid // 18)  # Show ~18 live brute-force grid steps across the table
+
+        self.get_logger().info(
+            f"[Phase 1 Full-Cloud Brute-Force] Scanning {total_grid} 3D grid positions across {len(full_scene)} scene points..."
+        )
+        for x in xs:
+            for y in ys:
+                for z in zs:
+                    cand_c = np.array([float(x), float(y), float(z)])
+                    src, _ = self._visible_cad_points(cand_c, 0.0, cam_pos)
+                    if not len(src):
+                        continue
+                    rmse, _, idx = self._model_to_scene_rmse(src, tree_scene)
+                    total_evals += 1
+                    scan_step += 1
+                    is_new_best = rmse < best[0]
+                    if is_new_best:
+                        best = (rmse, cand_c.copy(), 0.0)
+                    if scan_step % viz_stride == 0 or is_new_best:
+                        self._publish_icp_viz(
+                            full_scene, src, None, cand_c, 0.0,
+                            f"[Full-Cloud Brute-Force {scan_step}/{total_grid}] RMSE={rmse:.1f} mm (best={best[0]:.1f} mm)",
+                            (1.0, 0.55, 0.05),
+                            src_rgb=(255, 165, 30),
+                        )
+                        time.sleep(delay * 0.45)
+
+        # Fine local 3D + Yaw brute-force sweep around the best 3D region
+        b_center = best[1].copy()
+        for dx in (-0.015, 0.0, 0.015):
+            for dy in (-0.015, 0.0, 0.015):
+                for dz in (-0.008, 0.0, 0.008):
+                    cand_c = b_center + np.array([dx, dy, dz])
+                    for deg in range(-45, 45, 5):
+                        yaw_c = math.radians(deg)
+                        src, _ = self._visible_cad_points(cand_c, yaw_c, cam_pos)
+                        if not len(src):
+                            continue
+                        rmse, _, idx = self._model_to_scene_rmse(src, tree_scene)
+                        total_evals += 1
+                        if rmse < best[0]:
+                            best = (rmse, cand_c.copy(), yaw_c)
+                            self._publish_icp_viz(
+                                full_scene, src, None, cand_c, yaw_c,
+                                f"[Brute-Force Yaw {deg:+d} deg] New Best RMSE={rmse:.2f} mm",
+                                (1.0, 0.70, 0.10),
+                                src_rgb=(255, 190, 40),
+                            )
+                            time.sleep(delay * 0.45)
+
+        COARSE_THRESHOLD_MM = 11.0
+        self.get_logger().info(
+            f"Full-Cloud Brute-Force evaluated {total_evals} poses: "
+            f"best=({best[1][0]:.3f}, {best[1][1]:.3f}, {best[1][2]:.3f}), yaw={math.degrees(best[2]):+.1f} deg, "
+            f"RMSE={best[0]:.2f} mm (coarse threshold={COARSE_THRESHOLD_MM:.1f} mm)"
+        )
+
+        if best[0] >= COARSE_THRESHOLD_MM:
+            src, _ = self._visible_cad_points(best[1], best[2], cam_pos)
+            self._publish_icp_viz(
+                full_scene, src, None, best[1], best[2],
+                f"[REJECTED - NO CUBE IN FOV] Best RMSE={best[0]:.1f} mm >= {COARSE_THRESHOLD_MM:.0f} mm",
+                (1.0, 0.1, 0.1),
+                src_rgb=(255, 40, 40),
+            )
+            time.sleep(1.2)
+            self.get_logger().error(
+                f"Brute-Force best RMSE ({best[0]:.2f} mm) exceeds coarse threshold ({COARSE_THRESHOLD_MM:.1f} mm) — cube not in FOV!"
+            )
+            return None
+
+        # --- Stage C: Iterative Closest Point (ICP) directly on the FULL unfiltered scene cloud ---
+        center = best[1].copy()
+        yaw = best[2]
+        n_iters = max(self._icp_max_iters, 20)
+        prev_rmse = float("inf")
+        rmse = best[0]
+
+        for it in range(1, n_iters + 1):
+            src, norms = self._visible_cad_points(center, yaw, cam_pos)
+            if not len(src):
+                break
+            rmse, dists, idx_t = self._model_to_scene_rmse(src, tree_scene)
+            matched = full_scene[idx_t]
+
+            keep = dists < max(2.0 * float(np.median(dists)), 0.006)
+            s_k, t_k, n_k = src[keep], matched[keep], norms[keep]
+            rel = s_k - center
+            rot_jac = (-rel[:, 1] * n_k[:, 0]) + (rel[:, 0] * n_k[:, 1])
+            A = np.column_stack([n_k[:, 0], n_k[:, 1], n_k[:, 2], rot_jac])
+            b = np.sum((t_k - s_k) * n_k, axis=1)
+            ATA = A.T @ A + np.diag([1e-3, 1e-3, 1e-3, 1e-4])
+            delta = np.linalg.solve(ATA, A.T @ b)
+
+            alpha = 0.50
+            center = center + alpha * delta[:3]
+            yaw = self._wrap_yaw(yaw + alpha * delta[3])
+
+            self._publish_icp_viz(
+                full_scene, src, matched, center, yaw,
+                f"[Full-Cloud ICP {it}/{n_iters}] RMSE={rmse:.2f} mm | Pos=({center[0]:.3f},{center[1]:.3f},{center[2]:.3f}) | Yaw={math.degrees(yaw):+.1f} deg",
+                (0.10, 0.65, 1.0),
+                src_rgb=(40, 190, 255),
+            )
+            time.sleep(delay)
+            if it > 10 and abs(prev_rmse - rmse) < 0.005:
+                break
+            prev_rmse = rmse
+
+        src, _ = self._visible_cad_points(center, yaw, cam_pos)
+        rmse, _, idx = self._model_to_scene_rmse(src, tree_scene)
+        elapsed_compute = time.time() - t_start
+        ok = rmse < 8.0
+        self._publish_icp_viz(
+            full_scene, src, full_scene[idx], center, yaw,
+            f"[Full-Cloud ICP {'LOCKED' if ok else 'POOR FIT'}] RMSE={rmse:.2f} mm | "
+            f"({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}) Yaw={math.degrees(yaw):+.1f} deg",
+            (0.05, 0.92, 0.25) if ok else (1.0, 0.1, 0.1),
+            src_rgb=(40, 255, 90) if ok else (255, 40, 40),
+        )
+        time.sleep(1.2)
+        self.get_logger().info(
+            f"Full-Cloud ICP finished ({total_evals} BF evals, total time {elapsed_compute:.2f}s): "
+            f"X={center[0]:.4f} Y={center[1]:.4f} Z={center[2]:.4f} m, "
+            f"yaw={math.degrees(yaw):+.2f} deg, RMSE={rmse:.2f} mm ({'OK' if ok else 'REJECTED'})"
+        )
+        if not ok:
+            return None
+        return float(center[0]), float(center[1]), float(center[2]), float(yaw)
 
     def observe_and_detect_cube(self, target_z=0.825):
         """Execute wide table observation to obtain coarse cube coordinates."""
@@ -885,27 +1696,48 @@ class UR10ePerceptionPickPlaceNode(Node):
             self.get_logger().info("Robot is now holding at OBSERVE_CENTER (~40 deg angled 3D view of the red cube). Ready for RViz2 inspection!")
             return True
 
-        # Move to HOME
-        self.get_logger().info("[Step 1] Moving to HOME")
-        if not self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25):
-            return False
-        time.sleep(0.3)
+        for _ in range(5):
+            rclpy.spin_once(self, timeout_sec=0.05)
 
-        # Single-Stage Angled Observation & Detection (no 2nd stage closeup visual servoing)
-        self.get_logger().info("[Step 2] Executing Single-Scan Angled Observation (OBSERVE_CENTER)")
-        cube_x, cube_y, cube_z = self.observe_and_detect_cube(target_z=0.825)
-        if cube_x is None or cube_y is None:
-            self.get_logger().error("Cube detection failed. Aborting sequence.")
+        obs_delta = max(abs(a - b) for a, b in zip(self._current_joints, POSES["OBSERVE_CENTER"]))
+        if obs_delta > 0.08:
+            # Move to HOME then to angled observation pose OBSERVE_CENTER
+            self.get_logger().info("[Step 1] Moving to HOME")
+            if not self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25):
+                return False
+            time.sleep(0.3)
+
+            self.get_logger().info("[Step 2] Moving to angled observation pose OBSERVE_CENTER")
+            if not self.send_exact_trajectory("OBSERVE_CENTER", POSES["OBSERVE_CENTER"], duration_sec=3.0):
+                if not self.send_pose_goal("OBSERVE_CENTER", POSES["OBSERVE_CENTER"], velocity_scaling=0.30):
+                    return False
+            time.sleep(1.0)
+        else:
+            self.get_logger().info("[Step 1-2] Robot already at angled observation pose OBSERVE_CENTER; starting ICP scan immediately.")
+            time.sleep(0.4)
+
+        self.get_logger().info(f"[Step 3] 3D ICP pose estimation (mode: '{self._icp_mode}')")
+        if self._icp_mode == "segmented":
+            icp = self.estimate_cube_pose_segmented_icp()
+        else:
+            icp = self.estimate_cube_pose_icp()
+        if icp is None:
+            self.get_logger().error("ICP pose estimation failed. Aborting sequence.")
             self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25)
             return False
+        cube_x, cube_y, cube_z, cube_yaw = icp
+        cube_z = float(np.clip(cube_z, 0.815, 0.840))
 
         # Update detected cube pose in MoveIt PlanningScene
-        self.update_cube_in_planning_scene(cube_x, cube_y, cube_z)
+        self.update_cube_in_planning_scene(cube_x, cube_y, cube_z, cube_yaw)
 
-        # Compute trajectory waypoints with sequential seeding
-        self.get_logger().info(f"[Step 3] Computing grasp kinematics for target: X={cube_x:.3f}, Y={cube_y:.3f}")
+        # Compute trajectory waypoints with sequential seeding (gripper rotated by cube yaw)
+        self.get_logger().info(
+            f"[Step 3b] Computing grasp kinematics for target: X={cube_x:.3f}, Y={cube_y:.3f}, "
+            f"Z={cube_z:.3f}, yaw={math.degrees(cube_yaw):+.1f} deg"
+        )
         pre_grasp_pos = [cube_x, cube_y, 0.980]
-        grasp_pos     = [cube_x, cube_y, 0.825]
+        grasp_pos     = [cube_x, cube_y, cube_z]
         lift_pos      = [cube_x, cube_y, 0.980]
 
         place_x = cube_x
@@ -914,11 +1746,11 @@ class UR10ePerceptionPickPlaceNode(Node):
         place_pos          = [place_x, place_y, 0.825]
 
         q_curr = list(self._current_joints)
-        q_pre_grasp = self.solve_ik_target(pre_grasp_pos, q_seed=q_curr)
-        q_grasp     = self.solve_ik_target(grasp_pos, q_seed=q_pre_grasp)
-        q_lift      = self.solve_ik_target(lift_pos, q_seed=q_grasp)
-        q_place_app = self.solve_ik_target(place_approach_pos, q_seed=q_lift)
-        q_place     = self.solve_ik_target(place_pos, q_seed=q_place_app)
+        q_pre_grasp = self.solve_ik_target(pre_grasp_pos, q_seed=q_curr, yaw=cube_yaw)
+        q_grasp     = self.solve_ik_target(grasp_pos, q_seed=q_pre_grasp, yaw=cube_yaw)
+        q_lift      = self.solve_ik_target(lift_pos, q_seed=q_grasp, yaw=cube_yaw)
+        q_place_app = self.solve_ik_target(place_approach_pos, q_seed=q_lift, yaw=cube_yaw)
+        q_place     = self.solve_ik_target(place_pos, q_seed=q_place_app, yaw=cube_yaw)
 
         # Move to PRE_GRASP
         self.get_logger().info(f"[Step 4] Moving to PRE_GRASP at X={cube_x:.3f}, Y={cube_y:.3f}")
