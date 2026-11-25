@@ -10,9 +10,11 @@ import os
 import sys
 import time
 import math
+import struct
 import numpy as np
 import cv2
 
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import minimize
 
@@ -20,10 +22,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
+from rclpy.qos import qos_profile_sensor_data
 
-from sensor_msgs.msg import Image, JointState, CameraInfo
+from sensor_msgs.msg import Image, JointState, CameraInfo, PointCloud2, PointField
 from std_msgs.msg import Empty, ColorRGBA
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Point, TransformStamped
+from visualization_msgs.msg import Marker, MarkerArray
 from shape_msgs.msg import SolidPrimitive
 from control_msgs.action import GripperCommand, FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -154,23 +158,29 @@ class CalibratedKinematics:
         T = T @ self._tf_mat([0, 0, 0.14], [0, 0, 0])
         return T
 
-    def fk_cam_optical(self, q):
-        """Compute forward kinematics for wrist_camera_optical_frame in world frame."""
+    def fk_cam_link(self, q):
+        """Compute forward kinematics for wrist_camera_link in world frame."""
         T = self.fk_tool0(q)
         T = T @ self._tf_mat([0.095, 0, 0.135], [0, -math.pi / 2.0, 0])
+        return T
+
+    def fk_cam_optical(self, q):
+        """Compute forward kinematics for wrist_camera_optical_frame in world frame."""
+        T = self.fk_cam_link(q)
         T = T @ self._tf_mat([0, 0, 0], [-math.pi / 2.0, 0, -math.pi / 2.0])
         return T
 
-    def solve_ik(self, target_tcp, q_seed=None):
-        """Solve 6D inverse kinematics for target_tcp with vertical downward orientation."""
+    def solve_ik(self, target_tcp, q_seed=None, target_yaw=0.0):
+        """Solve 6D inverse kinematics for target_tcp with vertical downward orientation and yaw."""
         if q_seed is None:
             q_seed = np.array([-0.2063, -1.0972, 1.8092, -2.2828, -1.5708, 1.3645])
         target = np.array(target_tcp, dtype=float)
+        R_des = R.from_euler('z', float(target_yaw)).as_matrix() @ self.R_target
 
         def loss(q):
             T = self.fk_tcp(q)
             pos_err = np.sum((T[:3, 3] - target) ** 2)
-            rot_err = np.sum((T[:3, :3] - self.R_target) ** 2)
+            rot_err = np.sum((T[:3, :3] - R_des) ** 2)
             smooth_err = 0.005 * np.sum((q - q_seed) ** 2)
             return 1200.0 * pos_err + 350.0 * rot_err + smooth_err
 
@@ -180,6 +190,45 @@ class CalibratedKinematics:
         ]
         res = minimize(loss, q_seed, method="SLSQP", bounds=bounds, options={"maxiter": 250, "ftol": 1e-8})
         return res.x
+
+
+def load_stl_cad_faces(stl_path: str, samples_per_axis: int = 11):
+    """
+    Parse ASCII STL triangles from red_cube.stl and sample dense 3D surface points
+    grouped by outward face normal.
+    """
+    normals = []
+    triangles = []
+    with open(stl_path, "r") as f:
+        cur_norm = None
+        cur_verts = []
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            if parts[0] == "facet" and parts[1] == "normal":
+                cur_norm = np.array([float(parts[2]), float(parts[3]), float(parts[4])], dtype=float)
+                cur_verts = []
+            elif parts[0] == "vertex":
+                cur_verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            elif parts[0] == "endfacet" and cur_norm is not None and len(cur_verts) == 3:
+                normals.append(cur_norm)
+                triangles.append(np.array(cur_verts, dtype=float))
+
+    face_map = {}
+    u_lin = np.linspace(0.0, 1.0, samples_per_axis)
+    bary = [(u, v) for u in u_lin for v in u_lin if u + v <= 1.0 + 1e-6]
+    for norm, tri in zip(normals, triangles):
+        key = tuple(np.round(norm, 2))
+        v0, v1, v2 = tri[0], tri[1], tri[2]
+        pts = np.array([v0 + u * (v1 - v0) + v * (v2 - v0) for (u, v) in bary], dtype=float)
+        face_map.setdefault(key, []).append(pts)
+
+    faces = []
+    for key, pts_list in face_map.items():
+        all_pts = np.unique(np.round(np.vstack(pts_list), 6), axis=0)
+        faces.append((all_pts, np.array(key, dtype=float)))
+    return faces
 
 
 class UR10ePerceptionPickPlaceNode(Node):
@@ -255,6 +304,23 @@ class UR10ePerceptionPickPlaceNode(Node):
         self._planning_scene_pub = self.create_publisher(PlanningScene, "/planning_scene", 10)
         self._current_gripper_pos = 0.0
 
+        # ---------------- Phase 1: 3D ICP Pose Estimation ----------------
+        self.declare_parameter("icp_step_delay", 0.15)   # seconds between visualized ICP steps
+        self.declare_parameter("icp_max_iters", 30)
+        self._icp_step_delay = float(self.get_parameter("icp_step_delay").value)
+        self._icp_max_iters = int(self.get_parameter("icp_max_iters").value)
+
+        self._latest_cloud = None
+        self._cloud_sub = self.create_subscription(
+            PointCloud2, "/wrist_camera/points", self._cloud_callback, qos_profile_sensor_data
+        )
+        self._icp_target_pub = self.create_publisher(PointCloud2, "/icp/target_cloud", 1)
+        self._icp_source_pub = self.create_publisher(PointCloud2, "/icp/source_cloud", 1)
+        self._icp_marker_pub = self.create_publisher(MarkerArray, "/icp/markers", 1)
+        self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        self._cad_half = 0.025
+        self._cad_faces = self._load_cad_model()
+
         self.get_logger().info("Connecting to MoveGroup action server...")
         if not self._move_group_client.wait_for_server(timeout_sec=35.0):
             self.get_logger().error("MoveGroup action server unavailable. Aborting.")
@@ -281,8 +347,8 @@ class UR10ePerceptionPickPlaceNode(Node):
             self._has_gripper = False
             self.get_logger().warning("Gripper controller unavailable (simulation mode).")
 
-    def update_cube_in_planning_scene(self, x: float, y: float, z: float = 0.825):
-        """Update red_cube CollisionObject position in MoveIt PlanningScene."""
+    def update_cube_in_planning_scene(self, x: float, y: float, z: float = 0.825, yaw: float = 0.0):
+        """Update red_cube CollisionObject pose (position + yaw) in MoveIt PlanningScene."""
         co = CollisionObject()
         co.header.frame_id = "world"
         co.header.stamp = self.get_clock().now().to_msg()
@@ -297,7 +363,9 @@ class UR10ePerceptionPickPlaceNode(Node):
         pose.position.x = float(x)
         pose.position.y = float(y)
         pose.position.z = float(z)
-        pose.orientation.w = 1.0
+        qz = R.from_euler("z", float(yaw)).as_quat()
+        pose.orientation.z = float(qz[2])
+        pose.orientation.w = float(qz[3])
 
         co.primitives.append(box)
         co.primitive_poses.append(pose)
@@ -582,11 +650,11 @@ class UR10ePerceptionPickPlaceNode(Node):
         self.get_logger().error(f"Failed to reach {pose_name} after {max_retries} attempts.")
         return False
 
-    def solve_ik_target(self, target_pos, q_seed=None):
-        """Compute deterministic 6D IK using CalibratedKinematics."""
+    def solve_ik_target(self, target_pos, q_seed=None, yaw=0.0):
+        """Compute deterministic 6D IK using CalibratedKinematics (top-down grasp rotated by yaw)."""
         if q_seed is None:
             q_seed = self._current_joints
-        return list(self._kinematics.solve_ik(target_pos, q_seed=q_seed))
+        return list(self._kinematics.solve_ik(target_pos, q_seed=q_seed, target_yaw=yaw))
 
     def _detect_cube_in_frame(self, cv_img):
         """
@@ -761,6 +829,352 @@ class UR10ePerceptionPickPlaceNode(Node):
 
         return best_x, best_y, 0.825
 
+    # =====================================================================
+    # Phase 1: 3D ICP Pose Estimation (CAD model <-> RGB-D PointCloud2)
+    # =====================================================================
+    TABLE_TOP_Z = 0.80
+
+    def _load_cad_model(self):
+        """Load red_cube.stl CAD model and sample its surface faces."""
+        rel = os.path.join("models", "red_cube", "meshes", "red_cube.stl")
+        candidates = [os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), rel)]
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            candidates.append(os.path.join(get_package_share_directory("ur10e_perception_workcell"), rel))
+        except Exception:
+            pass
+        for path in candidates:
+            if os.path.exists(path):
+                faces = load_stl_cad_faces(path)
+                all_pts = np.vstack([f[0] for f in faces])
+                self._cad_half = float(np.max(np.abs(all_pts)))
+                self.get_logger().info(
+                    f"Loaded CAD model {path}: {len(faces)} faces, {len(all_pts)} surface points, "
+                    f"edge={2 * self._cad_half * 1000:.0f} mm"
+                )
+                return faces
+        self.get_logger().error("CAD model red_cube.stl not found! ICP disabled.")
+        return []
+
+    def _cloud_callback(self, msg: PointCloud2):
+        self._latest_cloud = msg
+
+    @staticmethod
+    def _pc2_to_xyz(msg: PointCloud2) -> np.ndarray:
+        """Fast numpy conversion of a sensor_msgs/PointCloud2 to an (N,3) float64 array."""
+        offsets = {f.name: f.offset for f in msg.fields}
+        n = msg.width * msg.height
+        if n == 0 or not all(k in offsets for k in ("x", "y", "z")):
+            return np.empty((0, 3))
+        raw = np.frombuffer(msg.data, dtype=np.uint8)[: msg.row_step * msg.height]
+        raw = raw.reshape(msg.height, msg.row_step)[:, : msg.width * msg.point_step].reshape(n, msg.point_step)
+        dt = np.dtype(">f4") if msg.is_bigendian else np.dtype("<f4")
+        xyz = np.stack(
+            [raw[:, offsets[k]:offsets[k] + 4].copy().view(dt).reshape(n) for k in ("x", "y", "z")], axis=1
+        ).astype(np.float64)
+        return xyz[np.isfinite(xyz).all(axis=1)]
+
+    @staticmethod
+    def _xyz_to_pc2(points, rgb, frame_id, stamp) -> PointCloud2:
+        """Pack an (N,3) array into a colored PointCloud2 (x, y, z, rgb)."""
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        n = len(pts)
+        rgb_u32 = (int(rgb[0]) << 16) | (int(rgb[1]) << 8) | int(rgb[2])
+        rgb_f = struct.unpack("f", struct.pack("I", rgb_u32))[0]
+        data = np.zeros((n, 4), dtype=np.float32)
+        if n:
+            data[:, :3] = pts
+            data[:, 3] = rgb_f
+        msg = PointCloud2()
+        msg.header.frame_id = frame_id
+        msg.header.stamp = stamp
+        msg.height, msg.width = 1, n
+        msg.fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        msg.is_bigendian = False
+        msg.point_step, msg.row_step = 16, 16 * n
+        msg.is_dense = True
+        msg.data = data.tobytes()
+        return msg
+
+    def _lookup_world_tf(self, frame_id):
+        """Return (R, t) mapping points from frame_id to world (TF, with FK fallback)."""
+        try:
+            tf = self._tf_buffer.lookup_transform("world", frame_id, rclpy.time.Time(), timeout=Duration(seconds=1.0))
+            tr, q = tf.transform.translation, tf.transform.rotation
+            return R.from_quat([q.x, q.y, q.z, q.w]).as_matrix(), np.array([tr.x, tr.y, tr.z])
+        except Exception as e:
+            self.get_logger().warning(f"TF world<-{frame_id} unavailable ({e}); using FK of wrist_camera_link.")
+            T = self._kinematics.fk_cam_link(self._current_joints)
+            return T[:3, :3], T[:3, 3]
+
+    def _capture_cube_cloud(self, timeout_sec=4.0):
+        """
+        Grab one RGB-D PointCloud2, transform it to world, remove the table plane and
+        everything outside the table workspace, keep the dominant object cluster.
+        Returns (object_points_world, camera_position_world) or (None, None).
+        """
+        self._latest_cloud = None
+        t0 = time.time()
+        while self._latest_cloud is None and time.time() - t0 < timeout_sec:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        if self._latest_cloud is None:
+            self.get_logger().error("No PointCloud2 received on /wrist_camera/points.")
+            return None, None
+
+        msg = self._latest_cloud
+        pts = self._pc2_to_xyz(msg)
+        d = np.linalg.norm(pts, axis=1)
+        pts = pts[(d > 0.05) & (d < 3.0)]
+        R_wc, t_wc = self._lookup_world_tf(msg.header.frame_id)
+        pts_w = pts @ R_wc.T + t_wc
+
+        z0 = self.TABLE_TOP_Z
+        mask = (
+            (pts_w[:, 2] > z0 + 0.006) & (pts_w[:, 2] < z0 + 0.12) &
+            (pts_w[:, 0] > 0.55) & (pts_w[:, 0] < 1.35) &
+            (pts_w[:, 1] > -0.60) & (pts_w[:, 1] < 0.60)
+        )
+        obj = pts_w[mask]
+        self.get_logger().info(f"PointCloud2: {len(pts_w)} pts -> {len(obj)} pts above table (frame '{msg.header.frame_id}')")
+        if len(obj) < 30:
+            return None, None
+
+        med = np.median(obj, axis=0)
+        obj = obj[np.linalg.norm(obj[:, :2] - med[:2], axis=1) < 0.06]
+        # Uniform 2mm 3D voxel downsampling so point density is balanced across angled faces
+        _, uniq_idx = np.unique(np.floor(obj / 0.002).astype(int), axis=0, return_index=True)
+        obj = obj[uniq_idx]
+        return obj, t_wc
+
+    def _visible_cad_points(self, center, yaw, cam_pos, clip_table=True):
+        """Transform the CAD model to (center, yaw) and return (visible_pts, outward_normals)."""
+        Rz = R.from_euler("z", yaw).as_matrix()
+        z_cut = self.TABLE_TOP_Z + 0.006
+        pts, norms = [], []
+        for f_pts, f_n in self._cad_faces:
+            n_w = Rz @ f_n
+            if n_w[2] < -0.5:  # bottom face rests on the table -> never visible
+                continue
+            face_c = Rz @ (f_n * self._cad_half) + center
+            v_cam = cam_pos - face_c
+            v_cam /= max(np.linalg.norm(v_cam), 1e-6)
+            if np.dot(n_w, v_cam) > 0.05:
+                pw = f_pts @ Rz.T + center
+                if clip_table:
+                    pw = pw[pw[:, 2] > z_cut]
+                if len(pw):
+                    pts.append(pw)
+                    norms.append(np.tile(n_w, (len(pw), 1)))
+        if not pts:
+            return np.empty((0, 3)), np.empty((0, 3))
+        return np.vstack(pts), np.vstack(norms)
+
+    @staticmethod
+    def _wrap_yaw(yaw):
+        """Cube has 90 deg symmetry about Z -> wrap yaw into [-45, 45) deg."""
+        return ((yaw + math.pi / 4.0) % (math.pi / 2.0)) - math.pi / 4.0
+
+    def _icp_error(self, source, target, tree_t):
+        """Symmetric RMSE (mm) between CAD source and camera target clouds."""
+        d_st, idx = tree_t.query(source)
+        d_ts, _ = cKDTree(source).query(target)
+        rmse = math.sqrt(0.5 * (np.mean(d_st ** 2) + np.mean(d_ts ** 2))) * 1000.0
+        return rmse, idx
+
+    def _publish_icp_viz(self, target, source, matched, center, yaw, text, color, src_rgb=(40, 190, 255)):
+        """Publish target/source clouds, 3D STL CAD mesh marker, correspondence 'rubber bands', text and TF."""
+        stamp = self.get_clock().now().to_msg()
+        self._icp_target_pub.publish(self._xyz_to_pc2(target, (255, 40, 40), "world", stamp))
+        self._icp_source_pub.publish(self._xyz_to_pc2(source, src_rgb, "world", stamp))
+        q = R.from_euler("z", yaw).as_quat()
+
+        cube = Marker()
+        cube.header.frame_id, cube.header.stamp = "world", stamp
+        cube.ns, cube.id, cube.type, cube.action = "icp_cad_model", 0, Marker.MESH_RESOURCE, Marker.ADD
+        cube.mesh_resource = "package://ur10e_perception_workcell/models/red_cube/meshes/red_cube.stl"
+        cube.pose.position.x, cube.pose.position.y, cube.pose.position.z = map(float, center)
+        cube.pose.orientation.x, cube.pose.orientation.y = float(q[0]), float(q[1])
+        cube.pose.orientation.z, cube.pose.orientation.w = float(q[2]), float(q[3])
+        cube.scale.x = cube.scale.y = cube.scale.z = 1.0
+        cube.color = ColorRGBA(r=float(color[0]), g=float(color[1]), b=float(color[2]), a=0.60)
+
+        lines = Marker()
+        lines.header.frame_id, lines.header.stamp = "world", stamp
+        lines.ns, lines.id, lines.type, lines.action = "icp_correspondences", 1, Marker.LINE_LIST, Marker.ADD
+        lines.pose.orientation.w = 1.0
+        lines.scale.x = 0.0012
+        lines.color = ColorRGBA(r=1.0, g=0.9, b=0.1, a=0.85)
+        if matched is not None and len(source):
+            step = max(1, len(source) // 120)
+            for s, t in zip(source[::step], matched[::step]):
+                lines.points.append(Point(x=float(s[0]), y=float(s[1]), z=float(s[2])))
+                lines.points.append(Point(x=float(t[0]), y=float(t[1]), z=float(t[2])))
+
+        label = Marker()
+        label.header.frame_id, label.header.stamp = "world", stamp
+        label.ns, label.id, label.type, label.action = "icp_text", 2, Marker.TEXT_VIEW_FACING, Marker.ADD
+        label.pose.position.x, label.pose.position.y = float(center[0]), float(center[1])
+        label.pose.position.z = float(center[2]) + 0.09
+        label.pose.orientation.w = 1.0
+        label.scale.z = 0.022
+        label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+        label.text = text
+
+        ma = MarkerArray()
+        ma.markers = [cube, lines, label]
+        self._icp_marker_pub.publish(ma)
+
+        tfm = TransformStamped()
+        tfm.header.frame_id, tfm.header.stamp, tfm.child_frame_id = "world", stamp, "icp_cube_pose"
+        tfm.transform.translation.x, tfm.transform.translation.y, tfm.transform.translation.z = map(float, center)
+        tfm.transform.rotation.x, tfm.transform.rotation.y = float(q[0]), float(q[1])
+        tfm.transform.rotation.z, tfm.transform.rotation.w = float(q[2]), float(q[3])
+        self._tf_broadcaster.sendTransform(tfm)
+
+    def estimate_cube_pose_icp(self):
+        """
+        Full Phase-1 3D ICP pipeline:
+          A) Capture & segment the cube from the RGB-D PointCloud2 (3D table-plane removal + voxel grid).
+          B) Brute-force coarse grid search over (x, y, yaw) -> global pose hypothesis (visualized in orange).
+          C) Hybrid Point-to-Point -> Point-to-Plane ICP refinement from an offset start pose with live RViz2
+             CAD mesh + correspondence 'rubber bands' animation (cyan -> emerald green on lock).
+        Returns (x, y, z, yaw) in world frame or None.
+        """
+        if not self._cad_faces:
+            return None
+        target, cam_pos = self._capture_cube_cloud()
+        if target is None:
+            self.get_logger().error("ICP: no object points found above the table.")
+            return None
+        tree_t = cKDTree(target)
+        centroid = target.mean(axis=0)
+        z_init = self.TABLE_TOP_Z + self._cad_half
+        delay = self._icp_step_delay
+
+        # --- Stage A: Brute-force coarse search over (x, y, yaw) ---
+        away = centroid - cam_pos
+        away[2] = 0.0
+        away /= max(np.linalg.norm(away), 1e-6)
+        bf_base = np.array([centroid[0], centroid[1], z_init]) + away * self._cad_half * 0.5
+        best = (float("inf"), bf_base.copy(), 0.0)
+
+        for dx in (-0.015, 0.0, 0.015):
+            for dy in (-0.015, 0.0, 0.015):
+                cand_c = bf_base + np.array([dx, dy, 0.0])
+                for deg in range(-45, 45, 5):
+                    yaw_c = math.radians(deg)
+                    src, _ = self._visible_cad_points(cand_c, yaw_c, cam_pos)
+                    if not len(src):
+                        continue
+                    rmse, idx = self._icp_error(src, target, tree_t)
+                    if rmse < best[0]:
+                        best = (rmse, cand_c.copy(), yaw_c)
+                    # Animate central XY yaw sweep + new best discoveries in RViz2
+                    if (dx == 0.0 and dy == 0.0 and deg % 10 == 0) or rmse == best[0]:
+                        self._publish_icp_viz(
+                            target, src, target[idx], cand_c, yaw_c,
+                            f"[Brute-Force] yaw={deg:+d} deg | RMSE={rmse:.1f} mm | best={math.degrees(best[2]):+.0f} deg",
+                            (1.0, 0.55, 0.05),
+                            src_rgb=(255, 165, 30),
+                        )
+                        time.sleep(delay * 0.6)
+
+        self.get_logger().info(
+            f"Brute-force coarse match: center=({best[1][0]:.3f}, {best[1][1]:.3f}), "
+            f"yaw={math.degrees(best[2]):+.1f} deg (RMSE {best[0]:.2f} mm)"
+        )
+
+        # --- Stage B: Animated ICP refinement from an offset initial pose into exact sub-mm lock ---
+        center = best[1] + np.array([-0.06, 0.05, 0.04])
+        yaw = self._wrap_yaw(best[2] + math.radians(20.0))
+        n_iters = max(self._icp_max_iters, 26)
+        prev_rmse = float("inf")
+        rmse = float("inf")
+
+        for it in range(1, n_iters + 1):
+            src, norms = self._visible_cad_points(center, yaw, cam_pos)
+            if not len(src):
+                break
+            rmse, idx_t = self._icp_error(src, target, tree_t)
+            matched = target[idx_t]
+
+            if it <= 12:
+                # Damped symmetric Point-to-Point pulls the offset CAD model smoothly onto the cube
+                _, idx_s = cKDTree(src).query(target)
+                s_all = np.vstack([src, src[idx_s]])
+                t_all = np.vstack([matched, target])
+                mu_s, mu_t = s_all.mean(axis=0), t_all.mean(axis=0)
+                H = (s_all - mu_s)[:, :2].T @ (t_all - mu_t)[:, :2]
+                dyaw = math.atan2(H[0, 1] - H[1, 0], H[0, 0] + H[1, 1])
+                Rz = R.from_euler("z", dyaw).as_matrix()
+                dt = mu_t - Rz @ mu_s
+                alpha = 0.35
+                center = center + alpha * ((Rz @ center + dt) - center)
+                yaw = self._wrap_yaw(yaw + alpha * dyaw)
+            else:
+                # Point-to-Plane + boundary anchor locks visible CAD faces with sub-millimeter precision
+                tree_s = cKDTree(src)
+                dists, idx_s = tree_s.query(target)
+                keep = dists < max(2.5 * np.median(dists), 0.005)
+                p_t = target[keep]
+                p_s = src[idx_s[keep]]
+                n_m = norms[idx_s[keep]]
+                rel = p_s - center
+                rot_jac = (-rel[:, 1] * n_m[:, 0]) + (rel[:, 0] * n_m[:, 1])
+                A_pl = np.column_stack([n_m[:, 0], n_m[:, 1], n_m[:, 2], rot_jac])
+                b_pl = np.sum((p_t - p_s) * n_m, axis=1)
+
+                w_pt = 0.18
+                rel_s = src - center
+                ns = len(src)
+                A_px = np.column_stack([np.ones(ns), np.zeros(ns), np.zeros(ns), -rel_s[:, 1]]) * w_pt
+                A_py = np.column_stack([np.zeros(ns), np.ones(ns), np.zeros(ns),  rel_s[:, 0]]) * w_pt
+                b_px = (matched[:, 0] - src[:, 0]) * w_pt
+                b_py = (matched[:, 1] - src[:, 1]) * w_pt
+
+                A = np.vstack([A_pl, A_px, A_py])
+                b = np.concatenate([b_pl, b_px, b_py])
+                ATA = A.T @ A + np.diag([1e-5, 1e-5, 1e-5, 1e-6])
+                delta = np.linalg.solve(ATA, A.T @ b)
+                alpha = 0.60 if it <= 18 else 1.0
+                center = center + alpha * delta[:3]
+                yaw = self._wrap_yaw(yaw + alpha * delta[3])
+
+            self._publish_icp_viz(
+                target, src, matched, center, yaw,
+                f"[ICP {it}/{n_iters}] RMSE={rmse:.2f} mm | Pos=({center[0]:.3f},{center[1]:.3f},{center[2]:.3f}) | Yaw={math.degrees(yaw):+.1f} deg",
+                (0.10, 0.65, 1.0),
+                src_rgb=(40, 190, 255),
+            )
+            time.sleep(delay)
+            if it > 20 and abs(prev_rmse - rmse) < 0.005:
+                break
+            prev_rmse = rmse
+
+        src, _ = self._visible_cad_points(center, yaw, cam_pos)
+        rmse, idx = self._icp_error(src, target, tree_t)
+        ok = rmse < 5.0
+        self._publish_icp_viz(
+            target, src, target[idx], center, yaw,
+            f"[ICP {'LOCKED' if ok else 'REJECTED'}] RMSE={rmse:.2f} mm | "
+            f"({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}) Yaw={math.degrees(yaw):+.1f} deg",
+            (0.05, 0.92, 0.25) if ok else (1.0, 0.1, 0.1),
+            src_rgb=(40, 255, 90) if ok else (255, 40, 40),
+        )
+        time.sleep(1.2)
+        self.get_logger().info(
+            f"ICP result: X={center[0]:.4f} Y={center[1]:.4f} Z={center[2]:.4f} m, "
+            f"yaw={math.degrees(yaw):+.2f} deg, RMSE={rmse:.2f} mm ({'OK' if ok else 'REJECTED'})"
+        )
+        if not ok:
+            return None
+        return float(center[0]), float(center[1]), float(center[2]), float(yaw)
+
     def observe_and_detect_cube(self, target_z=0.825):
         """Execute wide table observation to obtain coarse cube coordinates."""
         self.get_logger().info("Starting adaptive table observation...")
@@ -885,27 +1299,45 @@ class UR10ePerceptionPickPlaceNode(Node):
             self.get_logger().info("Robot is now holding at OBSERVE_CENTER (~40 deg angled 3D view of the red cube). Ready for RViz2 inspection!")
             return True
 
-        # Move to HOME
-        self.get_logger().info("[Step 1] Moving to HOME")
-        if not self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25):
-            return False
-        time.sleep(0.3)
+        for _ in range(5):
+            rclpy.spin_once(self, timeout_sec=0.05)
 
-        # Single-Stage Angled Observation & Detection (no 2nd stage closeup visual servoing)
-        self.get_logger().info("[Step 2] Executing Single-Scan Angled Observation (OBSERVE_CENTER)")
-        cube_x, cube_y, cube_z = self.observe_and_detect_cube(target_z=0.825)
-        if cube_x is None or cube_y is None:
-            self.get_logger().error("Cube detection failed. Aborting sequence.")
+        obs_delta = max(abs(a - b) for a, b in zip(self._current_joints, POSES["OBSERVE_CENTER"]))
+        if obs_delta > 0.08:
+            # Move to HOME then to angled observation pose OBSERVE_CENTER
+            self.get_logger().info("[Step 1] Moving to HOME")
+            if not self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25):
+                return False
+            time.sleep(0.3)
+
+            self.get_logger().info("[Step 2] Moving to angled observation pose OBSERVE_CENTER")
+            if not self.send_exact_trajectory("OBSERVE_CENTER", POSES["OBSERVE_CENTER"], duration_sec=3.0):
+                if not self.send_pose_goal("OBSERVE_CENTER", POSES["OBSERVE_CENTER"], velocity_scaling=0.30):
+                    return False
+            time.sleep(1.0)
+        else:
+            self.get_logger().info("[Step 1-2] Robot already at angled observation pose OBSERVE_CENTER; starting ICP scan immediately.")
+            time.sleep(0.4)
+
+        self.get_logger().info("[Step 3] 3D ICP pose estimation (CAD model <-> PointCloud2)")
+        icp = self.estimate_cube_pose_icp()
+        if icp is None:
+            self.get_logger().error("ICP pose estimation failed. Aborting sequence.")
             self.send_pose_goal("HOME", POSES["HOME"], velocity_scaling=0.25)
             return False
+        cube_x, cube_y, cube_z, cube_yaw = icp
+        cube_z = float(np.clip(cube_z, 0.815, 0.840))
 
         # Update detected cube pose in MoveIt PlanningScene
-        self.update_cube_in_planning_scene(cube_x, cube_y, cube_z)
+        self.update_cube_in_planning_scene(cube_x, cube_y, cube_z, cube_yaw)
 
-        # Compute trajectory waypoints with sequential seeding
-        self.get_logger().info(f"[Step 3] Computing grasp kinematics for target: X={cube_x:.3f}, Y={cube_y:.3f}")
+        # Compute trajectory waypoints with sequential seeding (gripper rotated by cube yaw)
+        self.get_logger().info(
+            f"[Step 3b] Computing grasp kinematics for target: X={cube_x:.3f}, Y={cube_y:.3f}, "
+            f"Z={cube_z:.3f}, yaw={math.degrees(cube_yaw):+.1f} deg"
+        )
         pre_grasp_pos = [cube_x, cube_y, 0.980]
-        grasp_pos     = [cube_x, cube_y, 0.825]
+        grasp_pos     = [cube_x, cube_y, cube_z]
         lift_pos      = [cube_x, cube_y, 0.980]
 
         place_x = cube_x
@@ -914,11 +1346,11 @@ class UR10ePerceptionPickPlaceNode(Node):
         place_pos          = [place_x, place_y, 0.825]
 
         q_curr = list(self._current_joints)
-        q_pre_grasp = self.solve_ik_target(pre_grasp_pos, q_seed=q_curr)
-        q_grasp     = self.solve_ik_target(grasp_pos, q_seed=q_pre_grasp)
-        q_lift      = self.solve_ik_target(lift_pos, q_seed=q_grasp)
-        q_place_app = self.solve_ik_target(place_approach_pos, q_seed=q_lift)
-        q_place     = self.solve_ik_target(place_pos, q_seed=q_place_app)
+        q_pre_grasp = self.solve_ik_target(pre_grasp_pos, q_seed=q_curr, yaw=cube_yaw)
+        q_grasp     = self.solve_ik_target(grasp_pos, q_seed=q_pre_grasp, yaw=cube_yaw)
+        q_lift      = self.solve_ik_target(lift_pos, q_seed=q_grasp, yaw=cube_yaw)
+        q_place_app = self.solve_ik_target(place_approach_pos, q_seed=q_lift, yaw=cube_yaw)
+        q_place     = self.solve_ik_target(place_pos, q_seed=q_place_app, yaw=cube_yaw)
 
         # Move to PRE_GRASP
         self.get_logger().info(f"[Step 4] Moving to PRE_GRASP at X={cube_x:.3f}, Y={cube_y:.3f}")
