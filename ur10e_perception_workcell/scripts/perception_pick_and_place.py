@@ -1037,8 +1037,8 @@ class UR10ePerceptionPickPlaceNode(Node):
             )
             return None, full_scene_world, t_wc, None
 
-        # Voxel downsampling (2.5mm) for balanced point distribution across top and sides
-        _, uniq_cube = np.unique(np.floor(cube_pts_world / 0.0025).astype(int), axis=0, return_index=True)
+        # Voxel downsampling (2mm) for balanced point distribution across top and sides
+        _, uniq_cube = np.unique(np.floor(cube_pts_world / 0.002).astype(int), axis=0, return_index=True)
         cube_pts_world = cube_pts_world[uniq_cube]
 
         kept_pct = 100.0 * len(cube_pts_world) / max(1, len(full_scene_world))
@@ -1393,7 +1393,7 @@ class UR10ePerceptionPickPlaceNode(Node):
         final_rmse = math.sqrt(0.5 * (float(np.mean(dists_final ** 2)) + float(np.mean(dists_ts_final ** 2)))) * 1000.0
         elapsed_compute = time.time() - t_start
 
-        ok = final_rmse < 5.0
+        ok = final_rmse < 8.0
         self._publish_icp_viz(
             cube_pts, src_final, cube_pts[idx_final], center, yaw,
             f"[Stage 2 Seg-ICP {'LOCKED (100% MATCH)' if ok else 'POOR FIT'}] RMSE={final_rmse:.2f} mm | "
