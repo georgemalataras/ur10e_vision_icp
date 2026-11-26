@@ -1,0 +1,236 @@
+[
+  {
+    "id": "part_bracket_small",
+    "display_name": "Bracket 23-040-6",
+    "row": 0,
+    "col": 0,
+    "x": 0.72,
+    "y": 0.22,
+    "z": 0.8,
+    "extents": [
+      0.039,
+      0.03,
+      0.04919024276733398
+    ],
+    "rgba": [
+      0.98,
+      0.45,
+      0.05,
+      1.0
+    ],
+    "hsv_ranges": [
+      [
+        [
+          11,
+          100,
+          80
+        ],
+        [
+          20,
+          255,
+          255
+        ]
+      ]
+    ],
+    "mesh_stl": "models/part_bracket_small/meshes/part_bracket_small.stl",
+    "mesh_obj": "models/part_bracket_small/meshes/part_bracket_small.obj",
+    "thumbnail": "models/part_thumbnails/part_bracket_small.png"
+  },
+  {
+    "id": "red_cube",
+    "display_name": "Red Cube",
+    "row": 0,
+    "col": 1,
+    "x": 0.72,
+    "y": 0.0,
+    "z": 0.8,
+    "extents": [
+      0.05,
+      0.05,
+      0.05
+    ],
+    "rgba": [
+      0.9,
+      0.1,
+      0.1,
+      1.0
+    ],
+    "hsv_ranges": [
+      [
+        [
+          0,
+          90,
+          60
+        ],
+        [
+          10,
+          255,
+          255
+        ]
+      ],
+      [
+        [
+          170,
+          90,
+          60
+        ],
+        [
+          180,
+          255,
+          255
+        ]
+      ]
+    ],
+    "mesh_stl": "models/red_cube/meshes/red_cube.stl",
+    "mesh_obj": "models/red_cube/meshes/red_cube.obj",
+    "thumbnail": "models/part_thumbnails/red_cube.png"
+  },
+  {
+    "id": "part_lindapter",
+    "display_name": "Lindapter",
+    "row": 0,
+    "col": 2,
+    "x": 0.72,
+    "y": -0.22,
+    "z": 0.8,
+    "extents": [
+      0.061944675445556645,
+      0.029,
+      0.048
+    ],
+    "rgba": [
+      0.15,
+      0.75,
+      0.25,
+      1.0
+    ],
+    "hsv_ranges": [
+      [
+        [
+          45,
+          80,
+          60
+        ],
+        [
+          85,
+          255,
+          255
+        ]
+      ]
+    ],
+    "mesh_stl": "models/part_lindapter/meshes/part_lindapter.stl",
+    "mesh_obj": "models/part_lindapter/meshes/part_lindapter.obj",
+    "thumbnail": "models/part_thumbnails/part_lindapter.png"
+  },
+  {
+    "id": "part_clamping_bar",
+    "display_name": "Clamping Bar",
+    "row": 1,
+    "col": 0,
+    "x": 0.96,
+    "y": 0.22,
+    "z": 0.8,
+    "extents": [
+      0.07590000000000001,
+      0.0484,
+      0.0385
+    ],
+    "rgba": [
+      0.95,
+      0.88,
+      0.1,
+      1.0
+    ],
+    "hsv_ranges": [
+      [
+        [
+          23,
+          100,
+          80
+        ],
+        [
+          36,
+          255,
+          255
+        ]
+      ]
+    ],
+    "mesh_stl": "models/part_clamping_bar/meshes/part_clamping_bar.stl",
+    "mesh_obj": "models/part_clamping_bar/meshes/part_clamping_bar.obj",
+    "thumbnail": "models/part_thumbnails/part_clamping_bar.png"
+  },
+  {
+    "id": "part_square_nut",
+    "display_name": "Square Nut",
+    "row": 1,
+    "col": 1,
+    "x": 0.96,
+    "y": 0.0,
+    "z": 0.8,
+    "extents": [
+      0.05000625085830688,
+      0.05000625085830688,
+      0.02500312542915344
+    ],
+    "rgba": [
+      0.65,
+      0.2,
+      0.85,
+      1.0
+    ],
+    "hsv_ranges": [
+      [
+        [
+          132,
+          70,
+          60
+        ],
+        [
+          165,
+          255,
+          255
+        ]
+      ]
+    ],
+    "mesh_stl": "models/part_square_nut/meshes/part_square_nut.stl",
+    "mesh_obj": "models/part_square_nut/meshes/part_square_nut.obj",
+    "thumbnail": "models/part_thumbnails/part_square_nut.png"
+  },
+  {
+    "id": "part_t_connector",
+    "display_name": "T-Connector",
+    "row": 1,
+    "col": 2,
+    "x": 0.96,
+    "y": -0.22,
+    "z": 0.8,
+    "extents": [
+      0.0675,
+      0.0675,
+      0.022500000000000006
+    ],
+    "rgba": [
+      0.1,
+      0.78,
+      0.85,
+      1.0
+    ],
+    "hsv_ranges": [
+      [
+        [
+          86,
+          80,
+          60
+        ],
+        [
+          99,
+          255,
+          255
+        ]
+      ]
+    ],
+    "mesh_stl": "models/part_t_connector/meshes/part_t_connector.stl",
+    "mesh_obj": "models/part_t_connector/meshes/part_t_connector.obj",
+    "thumbnail": "models/part_thumbnails/part_t_connector.png"
+  }
+]
