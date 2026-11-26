@@ -70,9 +70,9 @@ class WorkcellPlanningScenePublisher(Node):
 
         table_x = 0.95
         table_y = 0.0
-        # Tabletop: 0.80 x 1.20 x 0.05 m, top surface at Z = 0.80 m (center Z = 0.775 m)
+        # Tabletop: 0.80 x 1.20 x 0.05 m, top at Z = 0.797 m (3mm below Gazebo 0.800m to prevent OpenGL Z-fighting with RGB-D PointCloud)
         table_obj.primitives.append(self._make_box_primitive(0.80, 1.20, 0.05))
-        table_obj.primitive_poses.append(self._make_box_pose(table_x, table_y, 0.775))
+        table_obj.primitive_poses.append(self._make_box_pose(table_x, table_y, 0.772))
 
         # 4 Table Legs: 0.05 x 0.05 x 0.75 m (center Z = 0.375 m)
         for dx in (0.35, -0.35):
@@ -80,24 +80,9 @@ class WorkcellPlanningScenePublisher(Node):
                 table_obj.primitives.append(self._make_box_primitive(0.05, 0.05, 0.75))
                 table_obj.primitive_poses.append(self._make_box_pose(table_x + dx, table_y + dy, 0.375))
 
-        # 3. Red Cube CollisionObject (0.05 x 0.05 x 0.05 m on tabletop at Z = 0.825 m)
-        cube_obj = CollisionObject()
-        cube_obj.header.frame_id = "world"
-        cube_obj.header.stamp = now
-        cube_obj.id = "red_cube"
-        cube_obj.operation = CollisionObject.ADD
-        cube_obj.primitives.append(self._make_box_primitive(0.05, 0.05, 0.05))
-        cube_obj.primitive_poses.append(self._make_box_pose(self.cube_x, self.cube_y, self.cube_z))
-
         scene = PlanningScene()
         scene.is_diff = True
-        scene.world.collision_objects = [pedestal_obj, table_obj, cube_obj]
-
-        # Color only red_cube in bright red for contrast against the MoveIt green table & pedestal
-        cube_color = ObjectColor()
-        cube_color.id = "red_cube"
-        cube_color.color = ColorRGBA(r=0.95, g=0.10, b=0.10, a=1.0)
-        scene.object_colors = [cube_color]
+        scene.world.collision_objects = [pedestal_obj, table_obj]
         return scene
 
     def apply_scene(self):
@@ -118,7 +103,7 @@ class WorkcellPlanningScenePublisher(Node):
             rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
             if future.done() and future.result() is not None and future.result().success:
                 self.get_logger().info(
-                    f"Applied PlanningScene objects: ['pedestal', 'table', 'red_cube' at ({self.cube_x:.3f}, {self.cube_y:.3f}, {self.cube_z:.3f})]"
+                    "Applied PlanningScene objects: ['pedestal', 'table']"
                 )
             else:
                 self.get_logger().warning("ApplyPlanningScene service call did not confirm success, relied on /planning_scene topic.")

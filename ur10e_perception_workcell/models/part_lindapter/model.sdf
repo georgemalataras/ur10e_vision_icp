@@ -1,0 +1,55 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <model name="part_lindapter">
+    <static>false</static>
+    <link name="part_link">
+      <inertial>
+        <pose>0 0 0.02400 0 0 0</pose>
+        <mass>0.15</mass>
+        <inertia>
+          <ixx>0.0000393</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.0000768</iyy>
+          <iyz>0</iyz>
+          <izz>0.0000585</izz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/part_lindapter/meshes/part_lindapter.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>1000000.0</kp>
+              <kd>100.0</kd>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/part_lindapter/meshes/part_lindapter.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.090 0.450 0.150 1.00</ambient>
+          <diffuse>0.150 0.750 0.250 1.00</diffuse>
+          <specular>0.3 0.3 0.3 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
