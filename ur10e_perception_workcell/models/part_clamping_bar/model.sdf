@@ -1,0 +1,55 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <model name="part_clamping_bar">
+    <static>false</static>
+    <link name="part_link">
+      <inertial>
+        <pose>0 0 0.01925 0 0 0</pose>
+        <mass>0.15</mass>
+        <inertia>
+          <ixx>0.0000478</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.0000905</iyy>
+          <iyz>0</iyz>
+          <izz>0.0001013</izz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/part_clamping_bar/meshes/part_clamping_bar.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>1000000.0</kp>
+              <kd>100.0</kd>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/part_clamping_bar/meshes/part_clamping_bar.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.570 0.528 0.060 1.00</ambient>
+          <diffuse>0.950 0.880 0.100 1.00</diffuse>
+          <specular>0.3 0.3 0.3 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

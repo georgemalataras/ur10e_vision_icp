@@ -2,48 +2,51 @@
 <sdf version="1.8">
   <model name="red_cube">
     <static>false</static>
-    <link name="cube_link">
+    <link name="part_link">
       <inertial>
-        <mass>0.10</mass>
+        <pose>0 0 0.02500 0 0 0</pose>
+        <mass>0.15</mass>
         <inertia>
-          <ixx>0.0000417</ixx>
+          <ixx>0.0000625</ixx>
           <ixy>0</ixy>
           <ixz>0</ixz>
-          <iyy>0.0000417</iyy>
+          <iyy>0.0000625</iyy>
           <iyz>0</iyz>
-          <izz>0.0000417</izz>
+          <izz>0.0000625</izz>
         </inertia>
       </inertial>
-      <collision name="cube_collision">
+      <collision name="collision">
         <geometry>
-          <box>
-            <size>0.05 0.05 0.05</size>
-          </box>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/red_cube/meshes/red_cube.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
         </geometry>
         <surface>
           <friction>
             <ode>
-              <mu>100.0</mu>
-              <mu2>100.0</mu2>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
             </ode>
           </friction>
           <contact>
             <ode>
-              <kp>1000000</kp>
-              <kd>1</kd>
+              <kp>1000000.0</kp>
+              <kd>100.0</kd>
             </ode>
           </contact>
         </surface>
       </collision>
-      <visual name="cube_visual">
+      <visual name="visual">
         <geometry>
-          <box>
-            <size>0.05 0.05 0.05</size>
-          </box>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/red_cube/meshes/red_cube.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
         </geometry>
         <material>
-          <ambient>1.0 0.05 0.05 1</ambient>
-          <diffuse>0.9 0.1 0.1 1</diffuse>
+          <ambient>0.540 0.060 0.060 1.00</ambient>
+          <diffuse>0.900 0.100 0.100 1.00</diffuse>
           <specular>0.3 0.3 0.3 1</specular>
         </material>
       </visual>

@@ -45,7 +45,7 @@ def generate_launch_description():
 
     declare_script_delay = DeclareLaunchArgument(
         "script_delay",
-        default_value="12.0",
+        default_value="6.0",
         description="Delay in seconds before starting motion sequence to let Gazebo and MoveIt initialize",
     )
 
@@ -106,11 +106,11 @@ def generate_launch_description():
         actions=[planning_scene_publisher_node],
     )
 
-    # 3. Vision-Guided Motion Planning Sequence Node
+    # 3. Vision-Guided Motion Planning Sequence Node (NVIDIA FoundationPose)
     perception_pick_and_place_node = Node(
         package="ur10e_perception_workcell",
-        executable="perception_pick_and_place.py",
-        name="ur10e_perception_pick_place_node",
+        executable="foundationpose_pick_and_place.py",
+        name="ur10e_foundationpose_pick_place_node",
         output="screen",
         parameters=[
             {"use_sim_time": True},
@@ -119,10 +119,10 @@ def generate_launch_description():
     )
 
     # When run_script:=false, automatically move the robot to the angled observation pose
-    # so the camera immediately sees the red cube under angle in RViz2/Gazebo
+    # so the camera immediately sees all 6 CAD parts under angle in RViz2/Gazebo
     initial_observe_pose_node = Node(
         package="ur10e_perception_workcell",
-        executable="perception_pick_and_place.py",
+        executable="foundationpose_pick_and_place.py",
         name="ur10e_initial_observe_pose_node",
         output="screen",
         parameters=[

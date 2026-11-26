@@ -447,28 +447,61 @@
           <depth_camera>
             <clip>
               <near>0.05</near>
-              <far>5.0</far>
+              <far>1.45</far>
             </clip>
           </depth_camera>
         </camera>
         <always_on>1</always_on>
-        <update_rate>20</update_rate>
+        <update_rate>10</update_rate>
         <visualize>true</visualize>
         <topic>/wrist_camera</topic>
         <gz_frame_id>$(arg tf_prefix)wrist_camera_link</gz_frame_id>
       </sensor>
     </gazebo>
 
-    <!-- Detachable Joint System for picking and placing red_cube in Gazebo -->
+    <!-- Detachable Joint Systems for picking and placing any of the 6 CAD parts in Gazebo -->
     <gazebo>
-      <plugin filename="gz-sim-detachable-joint-system"
-              name="gz::sim::systems::DetachableJoint">
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
+        <child_model>part_bracket_small</child_model>
+        <child_link>part_link</child_link>
+        <detach_topic>/part_bracket_small/detach</detach_topic>
+        <attach_topic>/part_bracket_small/attach</attach_topic>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
         <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
         <child_model>red_cube</child_model>
-        <child_link>cube_link</child_link>
-        <detach_topic>/cube/detach</detach_topic>
-        <attach_topic>/cube/attach</attach_topic>
-        <output_topic>/cube/state</output_topic>
+        <child_link>part_link</child_link>
+        <detach_topic>/red_cube/detach</detach_topic>
+        <attach_topic>/red_cube/attach</attach_topic>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
+        <child_model>part_lindapter</child_model>
+        <child_link>part_link</child_link>
+        <detach_topic>/part_lindapter/detach</detach_topic>
+        <attach_topic>/part_lindapter/attach</attach_topic>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
+        <child_model>part_clamping_bar</child_model>
+        <child_link>part_link</child_link>
+        <detach_topic>/part_clamping_bar/detach</detach_topic>
+        <attach_topic>/part_clamping_bar/attach</attach_topic>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
+        <child_model>part_square_nut</child_model>
+        <child_link>part_link</child_link>
+        <detach_topic>/part_square_nut/detach</detach_topic>
+        <attach_topic>/part_square_nut/attach</attach_topic>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
+        <child_model>part_t_connector</child_model>
+        <child_link>part_link</child_link>
+        <detach_topic>/part_t_connector/detach</detach_topic>
+        <attach_topic>/part_t_connector/attach</attach_topic>
       </plugin>
     </gazebo>
   </xacro:if>

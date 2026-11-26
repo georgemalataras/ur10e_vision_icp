@@ -150,41 +150,52 @@ def generate_launch_description():
         ],
     )
 
-    # Spawn Red Cube Entity at Random Table Pose (Fixed orientation Yaw=0.0)
-    cube_model_path = os.path.join(pkg_ur10e_workcell, "models", "red_cube", "model.sdf")
-    gz_spawn_cube = Node(
-        package="ros_gz_sim",
-        executable="create",
-        output="screen",
-        arguments=[
-            "-file",
-            cube_model_path,
-            "-name",
-            "red_cube",
-            "-x",
-            cube_x,
-            "-y",
-            cube_y,
-            "-z",
-            "0.825",
-            "-Y",
-            "0.0",
-        ],
-    )
+    # Spawn the 6 CAD Parts in a 2x3 Grid on the Table (Z=0.800m tabletop surface)
+    cad_parts_grid = [
+        ("part_bracket_small", "0.72", "0.22"),
+        ("red_cube",           "0.72", "0.00"),
+        ("part_lindapter",     "0.72", "-0.22"),
+        ("part_clamping_bar",  "0.96", "0.22"),
+        ("part_square_nut",    "0.96", "0.00"),
+        ("part_t_connector",   "0.96", "-0.22"),
+    ]
+    gz_spawn_parts = []
+    part_bridge_args = []
+    part_detach_cmds = []
+    for part_id, px, py in cad_parts_grid:
+        model_sdf = os.path.join(pkg_ur10e_workcell, "models", part_id, "model.sdf")
+        gz_spawn_parts.append(
+            Node(
+                package="ros_gz_sim",
+                executable="create",
+                output="screen",
+                arguments=[
+                    "-file", model_sdf,
+                    "-name", part_id,
+                    "-x", px,
+                    "-y", py,
+                    "-z", "0.800",
+                    "-Y", "0.0",
+                ],
+            )
+        )
+        part_bridge_args.append(f"/{part_id}/attach@std_msgs/msg/Empty]gz.msgs.Empty")
+        part_bridge_args.append(f"/{part_id}/detach@std_msgs/msg/Empty]gz.msgs.Empty")
+        part_detach_cmds.append(
+            f"gz topic -t /{part_id}/detach -m gz.msgs.Empty -p ' '"
+        )
 
-    # ROS-GZ Parameter Bridge (/clock, /cube/attach, /cube/detach, RGB-D camera topics)
+    # ROS-GZ Parameter Bridge (/clock, 6x part attach/detach, RGB-D camera topics)
     gz_sim_bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
         arguments=[
             "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
-            "/cube/attach@std_msgs/msg/Empty]gz.msgs.Empty",
-            "/cube/detach@std_msgs/msg/Empty]gz.msgs.Empty",
             "/wrist_camera/image@sensor_msgs/msg/Image[gz.msgs.Image",
             "/wrist_camera/depth_image@sensor_msgs/msg/Image[gz.msgs.Image",
             "/wrist_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
             "/wrist_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
-        ],
+        ] + part_bridge_args,
         output="screen",
     )
 
@@ -294,23 +305,14 @@ def generate_launch_description():
         )
     )
 
-    # Ensure DetachableJoint is detached so cube rests freely on table under gravity
+    # Ensure DetachableJoints are detached so all 6 CAD parts rest freely on table under gravity
     gz_initial_detach = ExecuteProcess(
-        cmd=[
-            FindExecutable(name="gz"),
-            "topic",
-            "-t",
-            "/cube/detach",
-            "-m",
-            "gz.msgs.Empty",
-            "-p",
-            " ",
-        ],
+        cmd=["bash", "-c", " ; ".join(part_detach_cmds)],
         output="screen",
     )
 
     delayed_gz_initial_detach = TimerAction(
-        period=4.0,
+        period=7.0,
         actions=[gz_initial_detach],
     )
 
@@ -331,7 +333,7 @@ def generate_launch_description():
             robot_state_publisher_node,
             camera_gz_frame_tf,
             gz_spawn_entity,
-            gz_spawn_cube,
+        ] + gz_spawn_parts + [
             gz_sim_bridge,
             rviz_node,
             delayed_gz_initial_detach,

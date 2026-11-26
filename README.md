@@ -19,14 +19,23 @@ Implements a two-stage 6D pose estimation pipeline (`X, Y, Z, Yaw`) using an eye
 3. **Step 3/3 (Direct Pure ICP):** Initializes the CAD model (`red_cube.stl`) directly at the segmented cube centroid (no table brute-force sweep) and runs **Symmetric Point-to-Plane ICP** with live RViz2 correspondence visualization until `LOCKED` (`RMSE < 8.0 mm`).
 4. **Pick & Place:** Updates MoveIt 2 `PlanningScene`, rotates the gripper fingers to match `cube_yaw`, grasps, attaches, lifts, places, and detaches the cube.
 
+### Stage 3 — Multi-Object 6D Pose Estimation with NVIDIA FoundationPose (`v3.0.0`)
+- Spawns 6 CAD parts (`Bracket 23-040-6`, `Red Cube`, `Lindapter`, `Clamping Bar`, `Square Nut`, `T-Connector`) in a 2×3 tabletop layout.
+- Moves UR10e to an elevated angled observation pose (`OBSERVE_MULTI`) covering all 6 parts simultaneously within the wrist camera FOV.
+- Runs **NVIDIA FoundationPose** (Scorer & Refiner networks, `nvdiffrast`, `PyTorch3D`) via a persistent GPU inference server (`foundationpose_server.py`) bridged to ROS 2 (`foundationpose_pick_and_place.py`) using `/wrist_camera/image`, `/wrist_camera/depth_image`, and `/wrist_camera/camera_info`.
+- Displays all camera topics, always-visible 3D CAD meshes, 3D wireframe bounding boxes, labels, and per-object TF frames in RViz2.
+- Opens an interactive 2×3 tabletop UI (with 3D CAD thumbnails and names) prompting *"Which part do you want to pick up?"*, computes a shape-agnostic 3D cross-section grasp with exact Robotiq 2F-85 linkage kinematics, lifts the part, holds it aloft for 2.5 s, and places it back at its original position.
+
 ---
 
 ## Repository Structure & Git Workflow
 
-- `main`: Production-ready releases (`v1.0.0`, `v2.0.0`).
+- `main`: Production-ready releases (`v1.0.0`, `v2.0.0`, `v2.0.1`, `v3.0.0`).
 - `dev`: Integration branch where verified features are merged.
 - `feature/1-icp-pose-estimation-lift`: Stage 1 implementation (Full-cloud Brute-Force + ICP).
 - `feature/2-instance-segmentation-icp-lift`: Stage 2 implementation (2D Instance Segmentation $\rightarrow$ 3D PointCloud Masking $\rightarrow$ Direct ICP).
+- `fix/3-cube-always-visible`: Persistent RViz cube visual during pick-and-place.
+- `feature/4-foundationpose-multiobject-cad`: Stage 3 implementation (NVIDIA FoundationPose multi-object 6D estimation, interactive UI, 3D cross-section grasping).
 
 ### Package Contents
 - `ur10e_perception_workcell/scripts/` — [`perception_pick_and_place.py`](ur10e_perception_workcell/scripts/perception_pick_and_place.py), [`publish_planning_scene.py`](ur10e_perception_workcell/scripts/publish_planning_scene.py), [`spawn_random_cube.py`](ur10e_perception_workcell/scripts/spawn_random_cube.py)
