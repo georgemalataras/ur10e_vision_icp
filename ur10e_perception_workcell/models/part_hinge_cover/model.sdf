@@ -1,0 +1,55 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <model name="part_hinge_cover">
+    <static>false</static>
+    <link name="part_link">
+      <inertial>
+        <pose>0 0 0.00820 0 0 0</pose>
+        <mass>0.15</mass>
+        <inertia>
+          <ixx>0.0000214</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.0002865</iyy>
+          <iyz>0</iyz>
+          <izz>0.0003012</izz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/part_hinge_cover/meshes/part_hinge_cover.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>1000000.0</kp>
+              <kd>100.0</kd>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>package://ur10e_perception_workcell/models/part_hinge_cover/meshes/part_hinge_cover.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.060 0.468 0.510 1.00</ambient>
+          <diffuse>0.100 0.780 0.850 1.00</diffuse>
+          <specular>0.3 0.3 0.3 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

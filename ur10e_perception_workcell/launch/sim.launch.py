@@ -153,11 +153,11 @@ def generate_launch_description():
     # Spawn the 6 CAD Parts in a 2x3 Grid on the Table (Z=0.800m tabletop surface)
     cad_parts_grid = [
         ("part_bracket_small", "0.72", "0.22"),
-        ("red_cube",           "0.72", "0.00"),
+        ("part_hinge",         "0.72", "0.00"),
         ("part_lindapter",     "0.72", "-0.22"),
         ("part_clamping_bar",  "0.96", "0.22"),
         ("part_square_nut",    "0.96", "0.00"),
-        ("part_t_connector",   "0.96", "-0.22"),
+        ("part_hinge_cover",   "0.96", "-0.22"),
     ]
     gz_spawn_parts = []
     part_bridge_args = []
