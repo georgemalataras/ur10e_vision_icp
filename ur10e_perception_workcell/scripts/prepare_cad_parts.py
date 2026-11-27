@@ -3,6 +3,7 @@
 
 import json
 import os
+import xml.etree.ElementTree as ET
 import numpy as np
 import trimesh
 import matplotlib
@@ -11,8 +12,51 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
+def load_dae_solid(path: str) -> trimesh.Trimesh:
+    """Parse a COLLADA (.dae) file into a clean, watertight Trimesh."""
+    tree = ET.parse(path)
+    root = tree.getroot()
+    ns = {"c": "http://www.collada.org/2005/11/COLLADASchema"}
+    meshes = []
+    for geom in root.findall(".//c:geometry", ns):
+        m = geom.find("c:mesh", ns)
+        if m is None:
+            continue
+        verts_el = m.find("c:vertices", ns)
+        pos_id = None
+        for inp in verts_el.findall("c:input", ns):
+            if inp.attrib.get("semantic") == "POSITION":
+                pos_id = inp.attrib["source"].lstrip("#")
+        pos_arr = None
+        for src in m.findall("c:source", ns):
+            if src.attrib.get("id") == pos_id:
+                fa = src.find("c:float_array", ns)
+                pos_arr = np.fromstring(fa.text, sep=" ").reshape(-1, 3)
+        for prim_tag in ["c:triangles", "c:polylist"]:
+            for prim in m.findall(prim_tag, ns):
+                inputs = prim.findall("c:input", ns)
+                stride = max(int(i.attrib["offset"]) for i in inputs) + 1
+                v_off = [int(i.attrib["offset"]) for i in inputs if i.attrib["semantic"] == "VERTEX"][0]
+                p_vals = np.fromstring(prim.find("c:p", ns).text, sep=" ", dtype=int)
+                if prim_tag == "c:triangles":
+                    v_idx = p_vals[v_off::stride].reshape(-1, 3)
+                    meshes.append(trimesh.Trimesh(vertices=pos_arr, faces=v_idx, process=True))
+                else:
+                    vcounts = np.fromstring(prim.find("c:vcount", ns).text, sep=" ", dtype=int)
+                    faces = []
+                    cur = 0
+                    for vc in vcounts:
+                        poly = p_vals[cur + v_off : cur + vc * stride : stride]
+                        for k in range(1, vc - 1):
+                            faces.append([poly[0], poly[k], poly[k + 1]])
+                        cur += vc * stride
+                    meshes.append(trimesh.Trimesh(vertices=pos_arr, faces=np.array(faces), process=True))
+    return trimesh.util.concatenate(meshes) if len(meshes) > 1 else meshes[0]
+
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FREE_CAD_DIR = os.path.join(BASE_DIR, "models", "FREE_CAD_PARTS")
+RENEE_DIR = "/home/lms/renee_small_parts_meshes"
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 THUMBNAILS_DIR = os.path.join(MODELS_DIR, "part_thumbnails")
 os.makedirs(THUMBNAILS_DIR, exist_ok=True)
@@ -36,10 +80,9 @@ PARTS_SPEC = [
         "hsv_ranges": [[[11, 100, 80], [20, 255, 255]]],
     },
     {
-        "id": "red_cube",
-        "display_name": "Red Cube",
-        "stl_rel": None,
-        "box_size": [0.05, 0.05, 0.05],
+        "id": "part_hinge",
+        "display_name": "Hinge",
+        "dae_path": os.path.join(RENEE_DIR, "dae", "upper_hinge.dae"),
         "scale": 1.0,
         "euler_deg": [0, 0, 0],
         "row": 0,
@@ -89,16 +132,16 @@ PARTS_SPEC = [
         "hsv_ranges": [[[132, 70, 60], [165, 255, 255]]],
     },
     {
-        "id": "part_t_connector",
-        "display_name": "T-Connector",
-        "stl_rel": "t_connector/7982053.stl",
-        "scale": 0.0015,
-        "euler_deg": [0, 90, 0],  # Lay flat on its 67.5x67.5mm face
+        "id": "part_hinge_cover",
+        "display_name": "Hinge Cover",
+        "dae_path": os.path.join(RENEE_DIR, "dae", "upper_hinge_cover.dae"),
+        "scale": 1.0,
+        "euler_deg": [0, 0, 90],
         "row": 1,
         "col": 2,
         "x": 0.96,
         "y": -0.22,
-        "rgba": [0.10, 0.78, 0.85, 1.0],  # Cyan/Teal
+        "rgba": [0.10, 0.78, 0.85, 1.0],  # Cyan/Blue
         "hsv_ranges": [[[86, 80, 60], [99, 255, 255]]],
     },
 ]
@@ -218,9 +261,11 @@ def main():
     manifest = []
     for spec in PARTS_SPEC:
         part_id = spec["id"]
-        if spec.get("stl_rel"):
+        if spec.get("dae_path"):
+            mesh = load_dae_solid(spec["dae_path"])
+        elif spec.get("stl_rel"):
             src_stl = os.path.join(FREE_CAD_DIR, spec["stl_rel"])
-            mesh = trimesh.load(src_stl)
+            mesh = trimesh.load(src_stl, force="mesh")
         else:
             mesh = trimesh.creation.box(extents=spec["box_size"])
 
