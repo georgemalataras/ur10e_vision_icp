@@ -470,10 +470,10 @@
       </plugin>
       <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
         <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
-        <child_model>red_cube</child_model>
+        <child_model>part_hinge</child_model>
         <child_link>part_link</child_link>
-        <detach_topic>/red_cube/detach</detach_topic>
-        <attach_topic>/red_cube/attach</attach_topic>
+        <detach_topic>/part_hinge/detach</detach_topic>
+        <attach_topic>/part_hinge/attach</attach_topic>
       </plugin>
       <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
         <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
@@ -498,10 +498,10 @@
       </plugin>
       <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
         <parent_link>$(arg tf_prefix)wrist_3_link</parent_link>
-        <child_model>part_t_connector</child_model>
+        <child_model>part_hinge_cover</child_model>
         <child_link>part_link</child_link>
-        <detach_topic>/part_t_connector/detach</detach_topic>
-        <attach_topic>/part_t_connector/attach</attach_topic>
+        <detach_topic>/part_hinge_cover/detach</detach_topic>
+        <attach_topic>/part_hinge_cover/attach</attach_topic>
       </plugin>
     </gazebo>
   </xacro:if>

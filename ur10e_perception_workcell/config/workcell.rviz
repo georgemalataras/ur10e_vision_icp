@@ -76,7 +76,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/TF
       Enabled: true
       Filter (blacklist): ""
-      Filter (whitelist): "world|base_link|tool0|tcp_link|wrist_camera_link|wrist_camera_optical_frame|part_bracket_small|red_cube|part_lindapter|part_clamping_bar|part_square_nut|part_t_connector"
+      Filter (whitelist): "world|base_link|tool0|tcp_link|wrist_camera_link|wrist_camera_optical_frame|part_bracket_small|part_hinge|part_lindapter|part_clamping_bar|part_square_nut|part_hinge_cover"
       Frame Timeout: 15
       Frames:
         All Enabled: false
